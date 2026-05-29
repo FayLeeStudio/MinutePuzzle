@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MinutePuzzle — 一分钟拼图</title>
+<style>
+  /* ===== 页面基础样式：暗色，居中 ===== */
+  html, body {
+    margin: 0; height: 100%;
+    background: #0d0d10;
+    color: #e8e8ec;
+    font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    -webkit-user-select: none; user-select: none;
+    overflow: hidden;
+  }
+  #wrap {
+    height: 100%;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 10px;
+  }
+  #tip { font-size: 14px; color: #8a8a93; letter-spacing: .5px; }
+  /* 画布按比例缩放以适应窗口，逻辑分辨率固定 */
+  #stage { position: relative; }
+  #game {
+    display: block;
+    max-width: 96vw; max-height: 82vh;
+    width: 980px; height: 620px;        /* 默认逻辑尺寸，CSS 会按 max-* 缩放 */
+    touch-action: none;                  /* 让 pointer 事件接管触屏手势 */
+    border-radius: 10px;
+    box-shadow: 0 10px 40px rgba(0,0,0,.6);
+  }
+  /* ===== 胜负浮层 ===== */
+  #overlay {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 18px;
+    background: rgba(8,8,11,.78);
+    border-radius: 10px;
+    backdrop-filter: blur(2px);
+  }
+  #overlay[hidden] { display: none; }
+  /* 准备阶段：不遮挡画面，按钮放底部，让玩家看清完整的钟 */
+  #overlay.ready {
+    background: transparent; backdrop-filter: none;
+    justify-content: flex-end; padding-bottom: 34px;
+  }
+  #overlay.ready #msg {
+    font-size: 16px; font-weight: 400; color: #c8c8cf;
+    text-shadow: 0 1px 6px #000;
+  }
+  #msg { font-size: 26px; font-weight: 700; }
+  #restart {
+    font: inherit; font-size: 17px;
+    padding: 11px 26px;
+    border: none; border-radius: 8px;
+    background: #ff3b30; color: #fff;
+    cursor: pointer;
+  }
+  #restart:active { transform: translateY(1px); }
+</style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="tip">把外围 12 块碎片拖进中间网格，趁倒计时归零前拼出完整数字</div>
+    <div id="stage">
+      <canvas id="game" width="980" height="620"></canvas>
+      <div id="overlay" hidden>
+        <div id="msg"></div>
+        <button id="restart">再玩一局</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+"use strict";
+/* =====================================================================
+   MinutePuzzle — 最小可玩版
+   玩法：中间 3×4 网格是一块「实时七段数码管显示屏」，数字 59→00 每秒一跳。
+   12 块碎片是这块屏幕「对应区域、此刻」的取景框（不是静态快照），
+   拖到正确格子并对齐即吸附锁定；全部拼对算赢，倒计时到 00 后未拼完算输。
+   代码按 CLAUDE.md 的五块组织。
+   ===================================================================== */
+
+/* ---------- 全局配置 ---------- */
+const COLS = 4, ROWS = 3;          // 3×4 = 12 格（3 行 4 列，贴合两位数字的宽屏比例）
+const CELL = 96;                    // 每格 / 每块碎片边长（碎片与格子同尺寸，才能严丝合缝拼回）
+const START = 60;                   // 倒计时起始数字（主题：1min）
+const SNAP_DIST = CELL * 0.7;       // 松手时离格子中心多近才吸附
+
+const GRID_W = COLS * CELL;         // 网格 = 显示屏整体尺寸
+const GRID_H = ROWS * CELL;
+const CANVAS_W = 980, CANVAS_H = 620;
+const GRID_X = (CANVAS_W - GRID_W) / 2;   // 网格左上角（居中）
+const GRID_Y = (CANVAS_H - GRID_H) / 2;
+
+/* 数码管配色 */
+const SCREEN_BG = "#000000";   // 屏幕底色（纯黑，不带虚色）
+const SEG_LIT   = "#ff3b30";   // 点亮的段（熄灭的段不画，去掉虚虚的底色）
+
+/* 0–9 各点亮哪几段：顺序 [a,b,c,d,e,f,g]
+        aaa
+       f   b
+        ggg
+       e   c
+        ddd                      */
+const SEGMAP = {
+  0:[1,1,1,1,1,1,0], 1:[0,1,1,0,0,0,0], 2:[1,1,0,1,1,0,1],
+  3:[1,1,1,1,0,0,1], 4:[0,1,1,0,0,1,1], 5:[1,0,1,1,0,1,1],
+  6:[1,0,1,1,1,1,1], 7:[1,1,1,0,0,0,0], 8:[1,1,1,1,1,1,1],
+  9:[1,1,1,1,0,1,1],
+};
+
+/* =====================================================================
+   1) 画布与画笔（主 canvas + 离屏 canvas）
+   ===================================================================== */
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+// 离屏 canvas：每帧把整块显示屏画在这里，尺寸 = 网格尺寸，方便碎片按 1:1 取子矩形
+const off = document.createElement("canvas");
+off.width = GRID_W; off.height = GRID_H;
+const octx = off.getContext("2d");
+
+// 浮层 DOM
+const overlay = document.getElementById("overlay");
+const msgEl = document.getElementById("msg");
+const btnEl = document.getElementById("restart");
+// 按钮行为随状态变化：准备阶段＝开始；胜负阶段＝重置回准备
+btnEl.addEventListener("click", () => {
+  if (state.status === "ready") startGame();
+  else setupGame();
+});
+
+/* =====================================================================
+   2) 游戏状态（集中管理）
+   ===================================================================== */
+const state = {
+  status: "ready",     // "ready" | "playing" | "win" | "lose"
+  startTime: 0,        // performance.now()，用时间戳推算倒计时
+  number: START,       // 当前应显示的数字
+  result: 0,           // 胜利时定格的剩余数字
+  pieces: [],          // 碎片数组（绘制顺序 = 数组顺序，拖拽中的排最后＝最上层）
+  grid: [],            // grid[r][c] = 占用该格的碎片 id，空为 null
+  drag: null,          // { id, offX, offY } 当前拖拽信息
+};
+
+// 重置到「准备」状态：12 块碎片先拼合好放在正确格子里，等玩家点开始
+function setupGame() {
+  state.status = "ready";
+  state.number = START;
+  state.drag = null;
+
+  // 网格占用：每格放上对应碎片（呈现完整画面）
+  state.grid = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+
+  // 造碎片：碎片 i 的正确格子 = (row, col)，初始就摆在正确格子上
+  const pieces = [];
+  for (let i = 0; i < ROWS * COLS; i++) {
+    const r = Math.floor(i / COLS), c = i % COLS;
+    pieces.push({
+      id: i,
+      row: r, col: c,            // 正确格子
+      sx: c * CELL, sy: r * CELL, // 在离屏显示屏上的取景子矩形左上角
+      x: GRID_X + c * CELL,      // 当前画布坐标（左上角）＝正确格子位置
+      y: GRID_Y + r * CELL,
+      cell: { r, c },            // 当前所在格子，准备阶段就在正确格子
+    });
+    state.grid[r][c] = i;
+  }
+  state.pieces = pieces;
+  showReady();
+}
+
+// 点开始：把碎片瞬间打散到外围放置区，起表，进入游戏
+function startGame() {
+  state.grid = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+  for (const p of state.pieces) p.cell = null;
+  scatterPieces(state.pieces);     // 打散到外围放置区
+  state.startTime = performance.now();
+  state.status = "playing";
+  overlay.hidden = true;
+}
+
+// 把碎片随机散到网格外围的「放置区」，尽量不互相重叠、不压到网格
+function scatterPieces(pieces) {
+  const pad = 12;
+  // 四条外围带（左/右/上/下），过滤掉无效（太窄）的
+  const bands = [
+    { x0: pad, x1: GRID_X - CELL - pad, y0: pad, y1: CANVAS_H - CELL - pad },              // 左
+    { x0: GRID_X + GRID_W + pad, x1: CANVAS_W - CELL - pad, y0: pad, y1: CANVAS_H - CELL - pad }, // 右
+    { x0: pad, x1: CANVAS_W - CELL - pad, y0: pad, y1: GRID_Y - CELL - pad },              // 上
+    { x0: pad, x1: CANVAS_W - CELL - pad, y0: GRID_Y + GRID_H + pad, y1: CANVAS_H - CELL - pad }, // 下
+  ].filter(b => b.x1 > b.x0 && b.y1 > b.y0);
+
+  const placed = [];
+  for (const p of pieces) {
+    let best = null;
+    for (let tries = 0; tries < 80; tries++) {
+      const b = bands[(Math.random() * bands.length) | 0];
+      const x = b.x0 + Math.random() * (b.x1 - b.x0);
+      const y = b.y0 + Math.random() * (b.y1 - b.y0);
+      best = { x, y };
+      // 与已放置碎片保持间距，重叠则重试
+      const ok = placed.every(q => Math.abs(q.x - x) > CELL * 0.9 || Math.abs(q.y - y) > CELL * 0.9);
+      if (ok) break;
+    }
+    p.x = best.x; p.y = best.y;
+    placed.push(best);
+  }
+}
+
+/* =====================================================================
+   3) 输入（拖拽：pointer 事件，自动覆盖鼠标 + 触屏）
+   ===================================================================== */
+
+// 把指针的页面坐标换算成画布逻辑坐标（画布被 CSS 缩放过，要按比例还原）
+function toCanvas(e) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (canvas.width / r.width),
+    y: (e.clientY - r.top) * (canvas.height / r.height),
+  };
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  if (state.status !== "playing") return;
+  const p = toCanvas(e);
+  // 从最上层（数组末尾）向下做命中测试
+  for (let i = state.pieces.length - 1; i >= 0; i--) {
+    const pc = state.pieces[i];
+    if (p.x >= pc.x && p.x <= pc.x + CELL && p.y >= pc.y && p.y <= pc.y + CELL) {
+      // 若它原本占着某格，先把那格腾出来
+      if (pc.cell) { state.grid[pc.cell.r][pc.cell.c] = null; pc.cell = null; }
+      // 置顶（移到数组末尾），记录拖拽偏移
+      state.pieces.splice(i, 1);
+      state.pieces.push(pc);
+      state.drag = { id: pc.id, offX: p.x - pc.x, offY: p.y - pc.y };
+      canvas.setPointerCapture(e.pointerId);
+      break;
+    }
+  }
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  if (!state.drag) return;
+  const p = toCanvas(e);
+  const pc = pieceById(state.drag.id);
+  // 跟随指针，并夹在画布范围内
+  pc.x = clamp(p.x - state.drag.offX, 0, CANVAS_W - CELL);
+  pc.y = clamp(p.y - state.drag.offY, 0, CANVAS_H - CELL);
+});
+
+function endDrag(e) {
+  if (!state.drag) return;
+  const pc = pieceById(state.drag.id);
+  state.drag = null;
+  if (e) try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+
+  // 找离碎片中心最近的格子，够近且为空就吸附
+  const cx = pc.x + CELL / 2, cy = pc.y + CELL / 2;
+  let nr = Math.round((cy - GRID_Y - CELL / 2) / CELL);
+  let nc = Math.round((cx - GRID_X - CELL / 2) / CELL);
+  nr = clamp(nr, 0, ROWS - 1); nc = clamp(nc, 0, COLS - 1);
+  const gcx = GRID_X + nc * CELL + CELL / 2, gcy = GRID_Y + nr * CELL + CELL / 2;
+  const dist = Math.hypot(cx - gcx, cy - gcy);
+
+  if (dist <= SNAP_DIST && state.grid[nr][nc] === null) {
+    // 吸附到该格
+    pc.x = GRID_X + nc * CELL;
+    pc.y = GRID_Y + nr * CELL;
+    pc.cell = { r: nr, c: nc };
+    state.grid[nr][nc] = pc.id;
+    checkWin();   // 放对位置不锁定，可随时再拖；只在全部到位时判胜
+  }
+  // 否则：留在松手处（放置区里自由放着），等玩家再拖
+}
+
+// pointerup / 取消 / 失焦 都收尾，避免碎片「粘」在手上
+canvas.addEventListener("pointerup", endDrag);
+canvas.addEventListener("pointercancel", endDrag);
+window.addEventListener("blur", () => endDrag(null));
+
+function checkWin() {
+  // 全部碎片都在各自正确格子 = 胜利（不需要锁定）
+  const done = state.pieces.every(p => p.cell && p.cell.r === p.row && p.cell.c === p.col);
+  if (done) {
+    state.status = "win";
+    state.result = state.number;     // 定格此刻剩余数字作为成绩
+    showOverlay();
+  }
+}
+
+/* =====================================================================
+   4) 游戏循环（requestAnimationFrame：update → draw）
+   ===================================================================== */
+
+function update(now) {
+  if (state.status !== "playing") return;   // 胜负已分则冻结画面
+  // 用时间戳推算当前应显示的数字，别逐帧累加
+  const elapsed = (now - state.startTime) / 1000;
+  let n = START - Math.floor(elapsed);
+  if (n < 0) {
+    // 倒计时已越过 00 仍未拼完 → 判负，显示屏定格在 00
+    state.number = 0;
+    state.status = "lose";
+    showOverlay();
+    return;
+  }
+  state.number = n;
+}
+
+function draw() {
+  // 4.1 重画显示屏到离屏 canvas
+  drawDisplay(state.number);
+
+  // 4.2 画主画布
+  ctx.fillStyle = "#0d0d10";
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+  // 网格背景（像一块缺了块的屏幕）+ 淡淡的格线
+  ctx.fillStyle = SCREEN_BG;
+  ctx.fillRect(GRID_X, GRID_Y, GRID_W, GRID_H);
+  ctx.strokeStyle = "rgba(255,255,255,.10)";
+  ctx.lineWidth = 1;
+  for (let c = 0; c <= COLS; c++) line(GRID_X + c * CELL, GRID_Y, GRID_X + c * CELL, GRID_Y + GRID_H);
+  for (let r = 0; r <= ROWS; r++) line(GRID_X, GRID_Y + r * CELL, GRID_X + GRID_W, GRID_Y + r * CELL);
+
+  // 画所有碎片（数组顺序即层级，拖拽中的在最上层）
+  for (const pc of state.pieces) {
+    const dragging = state.drag && state.drag.id === pc.id;
+    ctx.save();
+    // 物理碎片的投影，拖动时更明显
+    ctx.shadowColor = "rgba(0,0,0,.6)";
+    ctx.shadowBlur = dragging ? 22 : 8;
+    ctx.shadowOffsetY = dragging ? 8 : 3;
+    // 取景框：把显示屏对应子矩形画到碎片当前位置（1:1）
+    // 显示屏已按网格中线设计，所以每块碎片的内容天然落在自己中线上
+    ctx.drawImage(off, pc.sx, pc.sy, CELL, CELL, pc.x, pc.y, CELL, CELL);
+    ctx.restore();
+    // 碎片边框
+    ctx.strokeStyle = dragging ? "rgba(255,255,255,.55)" : "rgba(255,255,255,.22)";
+    ctx.lineWidth = dragging ? 2 : 1;
+    ctx.strokeRect(pc.x + 0.5, pc.y + 0.5, CELL - 1, CELL - 1);
+  }
+}
+
+function loop(now) {
+  update(now);
+  draw();
+  requestAnimationFrame(loop);
+}
+
+/* ---------- 显示屏渲染（七段数码管，两位数字） ---------- */
+function drawDisplay(num) {
+  octx.fillStyle = SCREEN_BG;
+  octx.fillRect(0, 0, GRID_W, GRID_H);
+
+  const tens = Math.floor(num / 10), ones = num % 10;
+  const t = CELL * 0.26;                 // 段厚度
+  // 数字骨架的节点都落在格子中心：横段在行中线、竖段在列中线、拐角在格心
+  const yTop = cellCY(0), yMid = cellCY(1), yBot = cellCY(2);
+  drawDigit(tens, cellCX(0), cellCX(1), yTop, yMid, yBot, t); // 十位用第 0、1 列
+  drawDigit(ones, cellCX(2), cellCX(3), yTop, yMid, yBot, t); // 个位用第 2、3 列
+}
+
+// 画一个七段数字：竖段在 colL/colR 两条列中线上，横段在 yTop/yMid/yBot 三条行中线上，
+// 所有拐角正好落在格子中心 → 每块碎片的内容天然在自己的中线上
+function drawDigit(d, colL, colR, yTop, yMid, yBot, t) {
+  const segs = SEGMAP[d];
+  const hLen = colR - colL;   // 横段长 = 一个格距
+  const vLen = yMid - yTop;   // 竖段长 = 一个格距
+
+  segH(colL, yTop, hLen, t, segs[0]); // a 上
+  segV(colR, yTop, vLen, t, segs[1]); // b 右上
+  segV(colR, yMid, vLen, t, segs[2]); // c 右下
+  segH(colL, yBot, hLen, t, segs[3]); // d 下
+  segV(colL, yMid, vLen, t, segs[4]); // e 左下
+  segV(colL, yTop, vLen, t, segs[5]); // f 左上
+  segH(colL, yMid, hLen, t, segs[6]); // g 中
+}
+
+// 横向段：(x,y) 为左端中心点，len 长度，t 厚度，六边形带尖端
+function segH(x, y, len, t, on) {
+  const h = t / 2;
+  octx.beginPath();
+  octx.moveTo(x, y);
+  octx.lineTo(x + h, y - h);
+  octx.lineTo(x + len - h, y - h);
+  octx.lineTo(x + len, y);
+  octx.lineTo(x + len - h, y + h);
+  octx.lineTo(x + h, y + h);
+  octx.closePath();
+  fillSeg(on, t);
+}
+
+// 纵向段：(x,y) 为上端中心点，len 长度，t 厚度
+function segV(x, y, len, t, on) {
+  const h = t / 2;
+  octx.beginPath();
+  octx.moveTo(x, y);
+  octx.lineTo(x + h, y + h);
+  octx.lineTo(x + h, y + len - h);
+  octx.lineTo(x, y + len);
+  octx.lineTo(x - h, y + len - h);
+  octx.lineTo(x - h, y + h);
+  octx.closePath();
+  fillSeg(on, t);
+}
+
+function fillSeg(on, t) {
+  if (!on) return;                  // 熄灭的段不画（去掉虚虚的底色）
+  octx.shadowColor = SEG_LIT;
+  octx.shadowBlur = t * 0.7;        // 点亮段加一点辉光
+  octx.fillStyle = SEG_LIT;
+  octx.fill();
+  octx.shadowBlur = 0;
+}
+
+/* ---------- 小工具 ---------- */
+function cellCX(c) { return c * CELL + CELL / 2; }   // 第 c 列格子中心 x（离屏坐标）
+function cellCY(r) { return r * CELL + CELL / 2; }   // 第 r 行格子中心 y
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+function pieceById(id) { return state.pieces.find(p => p.id === id); }
+function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+
+// 准备阶段浮层：显示完整画面 + 开始按钮
+function showReady() {
+  msgEl.textContent = "看一眼完整的钟，点开始后碎片会打散";
+  btnEl.textContent = "开始游戏";
+  overlay.classList.add("ready");
+  overlay.hidden = false;
+}
+
+// 胜负浮层
+function showOverlay() {
+  if (state.status === "win") {
+    msgEl.textContent = `拼好了！🎉 定格在 ${pad2(state.result)} 秒`;
+  } else {
+    msgEl.textContent = "时间到 ⏱️ 没拼完——再来一次";
+  }
+  btnEl.textContent = "再玩一局";
+  overlay.classList.remove("ready");
+  overlay.hidden = false;
+}
+
+/* =====================================================================
+   5) 启动
+   ===================================================================== */
+setupGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
