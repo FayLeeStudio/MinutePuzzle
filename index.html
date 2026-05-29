@@ -18,15 +18,17 @@
     height: 100%;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
-    gap: 10px;
+    gap: 6px;
   }
-  #tip { font-size: 14px; color: #8a8a93; letter-spacing: .5px; }
-  /* 画布按比例缩放以适应窗口，逻辑分辨率固定 */
+  #tip {
+    font-size: 13px; color: #8a8a93; letter-spacing: .5px;
+    text-align: center; padding: 0 10px; line-height: 1.4;
+    max-width: 96vw;
+  }
+  /* 画布尺寸由 JS 按窗口实时设定，缓冲区与显示尺寸 1:1，不会被拉伸 */
   #stage { position: relative; }
   #game {
     display: block;
-    max-width: 96vw; max-height: 82vh;
-    width: 980px; height: 620px;        /* 默认逻辑尺寸，CSS 会按 max-* 缩放 */
     touch-action: none;                  /* 让 pointer 事件接管触屏手势 */
     border-radius: 10px;
     box-shadow: 0 10px 40px rgba(0,0,0,.6);
@@ -86,15 +88,14 @@
 
 /* ---------- 全局配置 ---------- */
 const COLS = 4, ROWS = 3;          // 3×4 = 12 格（3 行 4 列，贴合两位数字的宽屏比例）
-const CELL = 96;                    // 每格 / 每块碎片边长（碎片与格子同尺寸，才能严丝合缝拼回）
 const START = 60;                   // 倒计时起始数字（主题：1min）
-const SNAP_DIST = CELL * 0.7;       // 松手时离格子中心多近才吸附
 
-const GRID_W = COLS * CELL;         // 网格 = 显示屏整体尺寸
-const GRID_H = ROWS * CELL;
-const CANVAS_W = 980, CANVAS_H = 620;
-const GRID_X = (CANVAS_W - GRID_W) / 2;   // 网格左上角（居中）
-const GRID_Y = (CANVAS_H - GRID_H) / 2;
+// 以下尺寸都随窗口自适应，由 resize() 实时计算（不再写死）
+let CELL;                           // 每格 / 每块碎片边长
+let SNAP_DIST;                      // 松手时离格子中心多近才吸附
+let GRID_W, GRID_H;                 // 网格 = 显示屏整体尺寸
+let CANVAS_W, CANVAS_H;             // 画布（= 视口可用区域）尺寸
+let GRID_X, GRID_Y;                 // 网格左上角（居中）
 
 /* 数码管配色 */
 const SCREEN_BG = "#000000";   // 屏幕底色（纯黑，不带虚色）
@@ -119,12 +120,13 @@ const SEGMAP = {
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 
-// 离屏 canvas：每帧把整块显示屏画在这里，尺寸 = 网格尺寸，方便碎片按 1:1 取子矩形
+// 离屏 canvas：每帧把整块显示屏画在这里，尺寸 = 网格尺寸（在 resize() 里设定），
+// 方便碎片按 1:1 取子矩形
 const off = document.createElement("canvas");
-off.width = GRID_W; off.height = GRID_H;
 const octx = off.getContext("2d");
 
 // 浮层 DOM
+const tipEl = document.getElementById("tip");
 const overlay = document.getElementById("overlay");
 const msgEl = document.getElementById("msg");
 const btnEl = document.getElementById("restart");
@@ -133,6 +135,35 @@ btnEl.addEventListener("click", () => {
   if (state.status === "ready") startGame();
   else setupGame();
 });
+
+// 自适应布局：按当前视口算出画布尺寸、格子大小、网格位置，并重排碎片。
+// 画布缓冲区 = 显示尺寸（1:1），所以无论横竖屏都不会被拉伸。
+function resize() {
+  const tipH = tipEl ? tipEl.offsetHeight : 0;
+  CANVAS_W = Math.floor(Math.min(window.innerWidth, 1600));
+  CANVAS_H = Math.floor(window.innerHeight - tipH - 18);   // 给提示文字和间距留点
+  canvas.width = CANVAS_W; canvas.height = CANVAS_H;
+  canvas.style.width = CANVAS_W + "px"; canvas.style.height = CANVAS_H + "px";
+
+  // 格子大小：网格约占宽度 72%、高度 45%，取小的一边，保证四周留出散布碎片的余地
+  const cellByW = (CANVAS_W * 0.72) / COLS;
+  const cellByH = (CANVAS_H * 0.45) / ROWS;
+  CELL = Math.max(36, Math.floor(Math.min(cellByW, cellByH)));
+  GRID_W = COLS * CELL; GRID_H = ROWS * CELL;
+  GRID_X = Math.floor((CANVAS_W - GRID_W) / 2);
+  GRID_Y = Math.floor((CANVAS_H - GRID_H) / 2);
+  SNAP_DIST = CELL * 0.7;
+
+  // 离屏显示屏尺寸跟着变，碎片的取景子矩形与在格子里的坐标重算
+  off.width = GRID_W; off.height = GRID_H;
+  for (const p of state.pieces) {
+    p.sx = p.col * CELL; p.sy = p.row * CELL;
+    if (p.cell) { p.x = GRID_X + p.cell.c * CELL; p.y = GRID_Y + p.cell.r * CELL; }
+  }
+  // 散在外面的碎片（游戏/失败中）按新的外围带重新散一次，避免越界或重叠网格
+  const loose = state.pieces.filter(p => !p.cell);
+  if (loose.length) scatterPieces(loose);
+}
 
 /* =====================================================================
    2) 游戏状态（集中管理）
@@ -450,7 +481,11 @@ function showOverlay() {
 /* =====================================================================
    5) 启动
    ===================================================================== */
-setupGame();
+resize();        // 先算好布局（此时 state.pieces 还空，循环跳过）
+setupGame();     // 再造碎片（用到上面算出的尺寸）
+// 窗口尺寸 / 横竖屏切换时重新自适应
+window.addEventListener("resize", resize);
+window.addEventListener("orientationchange", resize);
 requestAnimationFrame(loop);
 </script>
 </body>
