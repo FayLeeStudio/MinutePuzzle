@@ -126,6 +126,14 @@ const LEVELS = [
     // 自动对局的贪吃蛇：影像在 60s 内持续移动，碎片随之实时变化
     renderFrame(octx, off, info) { drawSnake(octx, info); },
   },
+  {
+    id: 3,
+    name: "格斗对战",
+    grid: { cols: 4, rows: 3 },   // 4×3=12 块，宽屏比例贴合竞技场
+    duration: 60,
+    // 两个火柴人自动对打：顶部 P1/P2 血条 + 居中倒计时，回合即「一分钟」
+    renderFrame(octx, off, info) { drawFight(octx, info); },
+  },
 ];
 
 /* =====================================================================
@@ -693,6 +701,194 @@ function drawSnake(octx, info) {
     octx.arc(cellX(snake.food), cellY(snake.food), Math.min(tw, th) * 0.34, 0, Math.PI * 2);
     octx.fill();
   }
+}
+
+/* ---------- 第 3 关：火柴人格斗（自动对打 + 血条 + 倒计时） ----------
+   两个火柴人各自有简单状态机（idle 逼近 → attack 出拳 → 命中则对方 hurt 后仰、
+   掉血、被击退；血归零则 down 倒地）。按 elapsed 定步推进，胜负冻结/归零自然对齐。
+   位置用占宽比例(0~1)表示。HUD（血条+倒计时）也画进离屏，所以碎片里能看到。*/
+const fight = { t: -1, W: 0, H: 0, p1: null, p2: null };
+const FIGHT_STEP_DT = 1 / 30;        // 模拟步长
+const FIGHT_PUNCH_RANGE = 0.17;      // 出拳命中距离（占宽比例）
+const FIGHT_KICK_RANGE  = 0.23;      // 踢腿命中距离（更远）
+const FIGHT_MIN_GAP     = 0.11;      // 最小间距，避免互相穿过
+const FIGHT_ADVANCE = 0.14, FIGHT_RETREAT = 0.22, FIGHT_DASH = 0.42;  // 走位速度(占宽/秒)
+const FIGHT_PUNCH_DUR = 0.30, FIGHT_KICK_DUR = 0.42, FIGHT_HURT_DUR = 0.28;
+const FIGHT_JUMP_V = 2.0, FIGHT_GRAV = 6.5;        // 跳跃初速/重力
+
+function fightMakeFighter(x, facing) {
+  return { x, y: 0, vy: 0, hp: 100, st: "idle", facing,
+           timer: 0.2 + Math.random() * 0.4, atk: 0, hit: false, move: 0, dir: 1, hurt: 0 };
+}
+function fightReset() {
+  fight.t = 0;
+  fight.p1 = fightMakeFighter(0.28, 1);
+  fight.p2 = fightMakeFighter(0.72, -1);
+}
+
+function fightStartJump(a, dir) { a.st = "jump"; a.y = 0; a.vy = FIGHT_JUMP_V; a.dir = dir; }
+
+// 中性(idle)时按距离 + 随机挑下一个动作 → 制造丰富走位
+function fightDecide(a, b) {
+  if (b.hp <= 0) { a.timer = 0.6; return; }          // 已胜：原地待命
+  const dist = Math.abs(a.x - b.x), r = Math.random();
+  if (dist > 0.32) {                                  // 远：以拉近为主
+    if (r < 0.45)      { a.st = "advance"; a.move = 0.30 + Math.random() * 0.25; }
+    else if (r < 0.72) { a.st = "dash";    a.move = 0.20 + Math.random() * 0.15; }
+    else                 fightStartJump(a, 1);                       // 前跳
+  } else if (dist > FIGHT_KICK_RANGE) {               // 中距：逼近/远踢/跳/退
+    if (r < 0.38)      { a.st = "advance"; a.move = 0.18 + Math.random() * 0.18; }
+    else if (r < 0.60) { a.st = "kick";    a.atk = 0; a.hit = false; }
+    else if (r < 0.80) { a.st = "retreat"; a.move = 0.14 + Math.random() * 0.16; }
+    else                 fightStartJump(a, Math.random() < 0.5 ? 1 : -1);
+  } else {                                            // 近距：出招/拉开/跳开
+    if (r < 0.34)      { a.st = "punch"; a.atk = 0; a.hit = false; }
+    else if (r < 0.58) { a.st = "kick";  a.atk = 0; a.hit = false; }
+    else if (r < 0.84) { a.st = "retreat"; a.move = 0.18 + Math.random() * 0.18; } // 打完拉开＝走位
+    else                 fightStartJump(a, -1);                      // 后跳
+  }
+}
+
+// 出招命中判定（在招式中段那一帧结算一次）
+function fightHitCheck(a, b, range, dmg) {
+  const dur = a.st === "kick" ? FIGHT_KICK_DUR : FIGHT_PUNCH_DUR;
+  if (!a.hit && a.atk >= dur * 0.4) {
+    a.hit = true;
+    if (Math.abs(a.x - b.x) <= range && b.st !== "down") {
+      b.hp = Math.max(0, b.hp - dmg);
+      b.x = clamp(b.x + a.facing * 0.03, 0.10, 0.90);   // 击退
+      b.y = 0; b.vy = 0;
+      if (b.hp <= 0) b.st = "down"; else { b.st = "hurt"; b.hurt = FIGHT_HURT_DUR; }
+    }
+  }
+}
+
+function fightUpdateFighter(a, b, dt) {
+  a.facing = b.x >= a.x ? 1 : -1;                     // 始终面向对手
+  if (a.hp <= 0) { a.st = "down"; return; }
+  const gap = () => Math.abs(a.x - b.x);
+  switch (a.st) {
+    case "down": return;
+    case "hurt":    a.hurt -= dt; if (a.hurt <= 0) { a.st = "idle"; a.timer = 0.1 + Math.random() * 0.25; } return;
+    case "advance": if (gap() > FIGHT_MIN_GAP) a.x = clamp(a.x + a.facing * FIGHT_ADVANCE * dt, 0.10, 0.90);
+                    a.move -= dt; if (a.move <= 0) { a.st = "idle"; a.timer = 0.05 + Math.random() * 0.2; } return;
+    case "dash":    if (gap() > FIGHT_MIN_GAP) a.x = clamp(a.x + a.facing * FIGHT_DASH * dt, 0.10, 0.90);
+                    a.move -= dt; if (a.move <= 0) { a.st = "idle"; a.timer = Math.random() * 0.15; } return;
+    case "retreat": a.x = clamp(a.x - a.facing * FIGHT_RETREAT * dt, 0.07, 0.93);
+                    a.move -= dt; if (a.move <= 0) { a.st = "idle"; a.timer = 0.1 + Math.random() * 0.25; } return;
+    case "jump":    a.y += a.vy * dt; a.vy -= FIGHT_GRAV * dt;
+                    a.x = clamp(a.x + a.dir * a.facing * 0.12 * dt, 0.07, 0.93);   // 空中水平漂移
+                    if (a.y <= 0) { a.y = 0; a.st = "idle"; a.timer = 0.05 + Math.random() * 0.2; } return;
+    case "punch":   a.atk += dt; fightHitCheck(a, b, FIGHT_PUNCH_RANGE, 5 + Math.random() * 4);
+                    if (a.atk >= FIGHT_PUNCH_DUR) { a.st = "idle"; a.timer = 0.1 + Math.random() * 0.3; } return;
+    case "kick":    a.atk += dt; fightHitCheck(a, b, FIGHT_KICK_RANGE, 7 + Math.random() * 5);
+                    if (a.atk >= FIGHT_KICK_DUR) { a.st = "idle"; a.timer = 0.15 + Math.random() * 0.35; } return;
+    default:        a.timer -= dt; if (a.timer <= 0) fightDecide(a, b); return;   // idle
+  }
+}
+
+function fightStep() {
+  fightUpdateFighter(fight.p1, fight.p2, FIGHT_STEP_DT);
+  fightUpdateFighter(fight.p2, fight.p1, FIGHT_STEP_DT);
+  fight.t++;
+}
+
+function drawFight(octx, info) {
+  const W = info.gridW, H = info.gridH;
+  if (fight.t < 0 || fight.W !== W || fight.H !== H) { fight.W = W; fight.H = H; fightReset(); }
+  const target = Math.floor(info.elapsed / FIGHT_STEP_DT);
+  if (target < fight.t) fightReset();
+  let guard = 200;
+  while (fight.t < target && guard-- > 0) fightStep();
+
+  // 背景：夜色渐变 + 地面线
+  const g = octx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, "#1a1430"); g.addColorStop(1, "#0a0a12");
+  octx.fillStyle = g; octx.fillRect(0, 0, W, H);
+  const floorY = H * 0.84;
+  octx.strokeStyle = "rgba(255,255,255,.18)"; octx.lineWidth = 2;
+  octx.beginPath(); octx.moveTo(0, floorY); octx.lineTo(W, floorY); octx.stroke();
+
+  // 两个火柴人
+  const scale = H * 0.42;
+  drawStickman(octx, fight.p1, fight.p1.x * W, floorY, scale, "#5ea0ff");
+  drawStickman(octx, fight.p2, fight.p2.x * W, floorY, scale, "#ff6b6b");
+
+  // HUD：血条 + 倒计时
+  const pad = W * 0.04, barW = W * 0.36, barH = H * 0.055, by = H * 0.05;
+  drawHpBar(octx, pad, by, barW, barH, fight.p1.hp / 100, false);
+  drawHpBar(octx, W - pad - barW, by, barW, barH, fight.p2.hp / 100, true);
+  octx.fillStyle = "#fff";
+  octx.font = "bold " + Math.floor(H * 0.11) + "px ui-monospace, Menlo, monospace";
+  octx.textAlign = "center"; octx.textBaseline = "middle";
+  octx.fillText(pad2(info.remain), W / 2, by + barH / 2 + H * 0.005);
+}
+
+function drawHpBar(octx, x, y, w, h, frac, right) {
+  octx.fillStyle = "rgba(255,255,255,.14)"; octx.fillRect(x, y, w, h);   // 底
+  const fw = w * Math.max(0, Math.min(1, frac));
+  octx.fillStyle = frac > 0.3 ? "#39d353" : "#ff3b30";
+  octx.fillRect(right ? x + (w - fw) : x, y, fw, h);                     // 血量（右侧从右往左减）
+  octx.strokeStyle = "rgba(255,255,255,.45)"; octx.lineWidth = 1;
+  octx.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1);
+}
+
+// 画一个火柴人：x 为脚下中心，floorY 为地面，s 为整体高度
+function drawStickman(octx, p, x, floorY, s, color) {
+  const f = p.facing;
+  let cx = x, lean = 0, armOut = 0, kickOut = 0;
+  if (p.st === "punch") { const pr = Math.min(1, p.atk / FIGHT_PUNCH_DUR); armOut = Math.sin(pr * Math.PI); cx += f * armOut * s * 0.10; }
+  if (p.st === "kick")  { const pr = Math.min(1, p.atk / FIGHT_KICK_DUR);  kickOut = Math.sin(pr * Math.PI); cx += f * kickOut * s * 0.05; }
+  if (p.st === "hurt")  { lean = -f * s * 0.14 * (p.hurt / FIGHT_HURT_DUR); }
+  octx.save();
+  octx.strokeStyle = color; octx.fillStyle = color;
+  octx.lineWidth = Math.max(2, s * 0.05); octx.lineCap = "round"; octx.lineJoin = "round";
+
+  if (p.st === "down") {            // 倒地：横躺在地面
+    const yy = floorY - s * 0.07;
+    octx.beginPath();
+    octx.moveTo(cx - s * 0.30, yy); octx.lineTo(cx + s * 0.22, yy);          // 身体
+    octx.moveTo(cx - s * 0.05, yy); octx.lineTo(cx - s * 0.20, yy + s * 0.12); // 腿
+    octx.moveTo(cx - s * 0.05, yy); octx.lineTo(cx - s * 0.22, yy - s * 0.05);
+    octx.stroke();
+    octx.beginPath(); octx.arc(cx + s * 0.30, yy, s * 0.11, 0, Math.PI * 2); octx.stroke(); // 头
+    octx.restore();
+    return;
+  }
+
+  const feetY = floorY - p.y * s;     // 跳跃抬升
+  const bob = p.st === "jump" ? 0 : Math.sin(fight.t * FIGHT_STEP_DT * 7 + (f > 0 ? 0 : 1.5)) * s * 0.02;
+  const legLen = s * 0.40, torso = s * 0.34, headR = s * 0.11;
+  const hipY = feetY - legLen + bob;
+  const shY = hipY - torso;            // 肩
+  const shX = cx + lean;
+
+  octx.beginPath();
+  // 腿
+  if (p.st === "jump") {                                  // 空中收腿
+    octx.moveTo(cx, hipY); octx.lineTo(cx - s * 0.07, feetY - s * 0.10);
+    octx.moveTo(cx, hipY); octx.lineTo(cx + s * 0.07, feetY - s * 0.08);
+  } else if (kickOut > 0) {                               // 一腿前踢
+    octx.moveTo(cx, hipY); octx.lineTo(cx - f * s * 0.10, feetY);                                    // 支撑腿
+    octx.moveTo(cx, hipY); octx.lineTo(cx + f * (s * 0.12 + kickOut * s * 0.32), feetY - kickOut * s * 0.20); // 踢腿
+  } else {
+    octx.moveTo(cx, hipY); octx.lineTo(cx - s * 0.10, feetY);
+    octx.moveTo(cx, hipY); octx.lineTo(cx + s * 0.10, feetY);
+  }
+  // 躯干
+  octx.moveTo(cx, hipY); octx.lineTo(shX, shY);
+  // 后臂
+  octx.moveTo(shX, shY + s * 0.02); octx.lineTo(shX - f * s * 0.10, shY + s * 0.13);
+  // 前臂（出拳时前伸）
+  const handX = shX + f * (s * 0.11 + armOut * s * 0.26);
+  const handY = shY + s * 0.05 - armOut * s * 0.03;
+  octx.moveTo(shX, shY + s * 0.02); octx.lineTo(handX, handY);
+  octx.stroke();
+  // 拳头
+  if (armOut > 0.4) { octx.beginPath(); octx.arc(handX, handY, s * 0.05, 0, Math.PI * 2); octx.fill(); }
+  // 头
+  octx.beginPath(); octx.arc(shX + lean * 0.5, shY - headR * 1.1, headR, 0, Math.PI * 2); octx.stroke();
+  octx.restore();
 }
 
 /* =====================================================================
