@@ -543,10 +543,10 @@ function fillSeg(octx, on, t) {
    棋盘格 = 拼图网格的 DIV 倍细分（每块拼图含 DIV×DIV 个蛇格）。
    两个可调旋钮：SNAKE_STEPS_PER_SEC（速度/吃多快）、SNAKE_TILE_DIV（细分=能吃多满）。*/
 const snake = { W: 0, H: 0, cycle: [], cidx: null, body: [], occ: new Set(), food: -1, step: -1 };
-const SNAKE_TILE_DIV = 4;                   // 每块拼图细分成 DIV×DIV 个蛇格
+const SNAKE_TILE_DIV = 3;                   // 每块拼图细分成 DIV×DIV 个蛇格（越小越容易吃满）
 const SNAKE_STEPS_PER_SEC = 16;             // 速度：每秒走几格（越大吃得越快、越满）
 const SNAKE_STEP_DT = 1 / SNAKE_STEPS_PER_SEC;
-const SNAKE_START_LEN = 3;
+const SNAKE_START_LEN = 12;                 // 起始长度（开局就占一截，便于最终铺满）
 
 // 格子用整数键 k = y*W + x
 function snakeX(k) { return k % snake.W; }
