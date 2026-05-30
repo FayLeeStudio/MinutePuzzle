@@ -547,6 +547,7 @@ const SNAKE_TILE_DIV = 3;                   // 每块拼图细分成 DIV×DIV �
 const SNAKE_STEPS_PER_SEC = 16;             // 速度：每秒走几格（越大吃得越快、越满）
 const SNAKE_STEP_DT = 1 / SNAKE_STEPS_PER_SEC;
 const SNAKE_START_LEN = 12;                 // 起始长度（开局就占一截，便于最终铺满）
+const SNAKE_BODY_FRAC = 0.6;                // 蛇身粗细占格子的比例（越小越细；接近 1 才能铺满全屏）
 
 // 格子用整数键 k = y*W + x
 function snakeX(k) { return k % snake.W; }
@@ -658,25 +659,40 @@ function drawSnake(octx, info) {
   octx.fillStyle = SCREEN_BG;
   octx.fillRect(0, 0, W, H);
   const tw = W / tilesX, th = H / tilesY;
-  if (snake.food >= 0) {                                    // 食物（红）
-    octx.fillStyle = ACCENT;
-    snakeCell(octx, snakeX(snake.food) * tw, snakeY(snake.food) * th, tw, th, Math.min(tw, th) * 0.5);
-  }
-  for (let i = snake.body.length - 1; i >= 0; i--) {        // 蛇身：头亮、身暗
-    const k = snake.body[i];
-    octx.fillStyle = i === 0 ? "#39d353" : "#1f8f3d";
-    snakeCell(octx, snakeX(k) * tw, snakeY(k) * th, tw, th, Math.min(tw, th) * 0.28);
-  }
-}
+  const cellX = (k) => snakeX(k) * tw + tw / 2;            // 格中心坐标
+  const cellY = (k) => snakeY(k) * th + th / 2;
+  const thick = Math.min(tw, th) * SNAKE_BODY_FRAC;       // 蛇身线宽
 
-// 画一格蛇身/食物：留一点缝隙，看着像一节节
-function snakeCell(octx, x, y, w, h, r) {
-  const g = Math.min(w, h) * 0.12;
-  const xx = x + g, yy = y + g, ww = w - 2 * g, hh = h - 2 * g;
-  octx.beginPath();
-  if (octx.roundRect) octx.roundRect(xx, yy, ww, hh, r);
-  else octx.rect(xx, yy, ww, hh);
-  octx.fill();
+  // 蛇身：沿各格中心连成一条折线再描粗（圆角拐弯）→ 细而连续，像原版贪吃蛇
+  if (snake.body.length > 1) {
+    octx.strokeStyle = "#27a346";
+    octx.lineWidth = thick;
+    octx.lineJoin = "round";
+    octx.lineCap = "round";
+    octx.beginPath();
+    for (let i = 0; i < snake.body.length; i++) {
+      const k = snake.body[i];
+      if (i === 0) octx.moveTo(cellX(k), cellY(k));
+      else         octx.lineTo(cellX(k), cellY(k));
+    }
+    octx.stroke();
+  }
+  // 蛇头：亮色圆点
+  if (snake.body.length > 0) {
+    const h = snake.body[0];
+    octx.fillStyle = "#5ef07a";
+    octx.beginPath();
+    octx.arc(cellX(h), cellY(h), thick / 2, 0, Math.PI * 2);
+    octx.fill();
+  }
+
+  // 食物：红色圆点
+  if (snake.food >= 0) {
+    octx.fillStyle = ACCENT;
+    octx.beginPath();
+    octx.arc(cellX(snake.food), cellY(snake.food), Math.min(tw, th) * 0.34, 0, Math.PI * 2);
+    octx.fill();
+  }
 }
 
 /* =====================================================================
