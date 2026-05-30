@@ -925,7 +925,7 @@ function drawPhotoOverlay() {
     ctx.font = "bold " + Math.floor(CANVAS_H * 0.4) + "px ui-monospace, Menlo, monospace";
     ctx.fillText(state.photoNum, CANVAS_W / 2, CANVAS_H / 2);
     ctx.font = Math.floor(CANVAS_H * 0.04) + "px -apple-system, sans-serif";
-    ctx.fillText("看镜头，比个 V ✌️", CANVAS_W / 2, CANVAS_H * 0.82);
+    ctx.fillText("恭喜通关 ✌️", CANVAS_W / 2, CANVAS_H * 0.82);
   } else {
     const a = Math.max(0, 1 - (performance.now() - state.flashStart) / 420);   // 白闪渐隐
     if (a > 0) { ctx.fillStyle = "rgba(255,255,255," + a + ")"; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H); }
