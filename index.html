@@ -416,9 +416,9 @@ function checkWin() {
   // 关卡可用 checkWin 钩子覆盖默认判定；不写则用「全部碎片归位」
   const won = lv.checkWin ? lv.checkWin(state) : allPiecesHome();
   if (won) {
-    state.status = "win";
     state.result = state.remain;     // 定格此刻剩余秒数作为成绩
-    showOverlay();
+    if (lv.usesCamera) startPhotoFinish();   // 摄像头关（通关）：进入 3-2-1 拍照仪式
+    else { state.status = "win"; showOverlay(); }
   }
 }
 
@@ -487,10 +487,14 @@ function draw() {
     ctx.lineWidth = dragging ? 2 : 1;
     ctx.strokeRect(pc.x + 0.5, pc.y + 0.5, CELL - 1, CELL - 1);
   }
+
+  // 通关拍照仪式：在拼好的画面上盖 3-2-1 倒计时 / 白闪
+  if (state.status === "photo") drawPhotoOverlay();
 }
 
 function loop(now) {
   update(now);
+  if (state.status === "photo") updatePhoto(now);
   draw();
   requestAnimationFrame(loop);
 }
@@ -850,6 +854,81 @@ function drawCamera(octx, info) {
       ? (secure ? "摄像头不可用 / 已拒绝" : "摄像头需在 https(Pages) 下授权")
       : "请允许使用摄像头…";
     octx.fillText(msg, W / 2, H / 2);
+  }
+}
+
+/* ---------- 通关拍照仪式（赢下摄像头关后：3-2-1 → 拍照 → 存本地） ----------
+   倒计时期间镜头保持实时（status="photo" 不暂停）；到 0 抓取当前摄像头帧（镜像，
+   与预览一致）存为 PNG 下载到本地。摄像头权限在本关已授权，下载无需额外权限。*/
+function startPhotoFinish() {
+  state.status = "photo";
+  state.photoStart = performance.now();
+  state.photoNum = 3;
+  state.photoTaken = false;
+  state.photoSaved = false;
+  overlay.hidden = true;        // 收起浮层，让拼好的实时画面露出来
+}
+
+function updatePhoto(now) {
+  const t = (now - state.photoStart) / 1000;
+  if (t < 3) {
+    state.photoNum = 3 - Math.floor(t);            // 3 → 2 → 1
+  } else if (!state.photoTaken) {
+    state.photoTaken = true;
+    state.flashStart = now;
+    takePhoto();                                   // 拍 + 下载
+  } else if (now - state.flashStart > 700) {
+    // 拍完：进入通关浮层（仍是 win 状态，按钮逻辑照常 → 再玩一遍）
+    state.status = "win";
+    msgEl.textContent = state.photoSaved
+      ? `📸 已存到本地 · 通关啦！🏆 定格 ${pad2(state.result)} 秒`
+      : `通关啦！🏆 定格 ${pad2(state.result)} 秒`;
+    btnEl.textContent = "再玩一遍";
+    overlay.classList.remove("ready");
+    overlay.hidden = false;
+  }
+}
+
+function takePhoto() {
+  const v = cam.video;
+  if (!(cam.state === "ready" && v && v.videoWidth > 0)) return;   // 摄像头没就绪就跳过
+  const cnv = document.createElement("canvas");
+  cnv.width = v.videoWidth; cnv.height = v.videoHeight;
+  const c = cnv.getContext("2d");
+  c.translate(cnv.width, 0); c.scale(-1, 1);       // 镜像，与预览一致
+  c.drawImage(v, 0, 0, cnv.width, cnv.height);
+  cnv.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "MinutePuzzle-" + photoStamp() + ".png";
+    a.target = "_blank";                           // iOS Safari 不支持 download：会新开页便于长按保存
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+    state.photoSaved = true;
+  }, "image/png");
+}
+
+function photoStamp() {
+  const d = new Date(), p = (n) => (n < 10 ? "0" : "") + n;
+  return "" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
+// 在主画布上盖：倒计时大数字 / 拍照白闪
+function drawPhotoOverlay() {
+  if (!state.photoTaken) {
+    ctx.fillStyle = "rgba(0,0,0,.30)";
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.font = "bold " + Math.floor(CANVAS_H * 0.4) + "px ui-monospace, Menlo, monospace";
+    ctx.fillText(state.photoNum, CANVAS_W / 2, CANVAS_H / 2);
+    ctx.font = Math.floor(CANVAS_H * 0.04) + "px -apple-system, sans-serif";
+    ctx.fillText("看镜头，比个 V ✌️", CANVAS_W / 2, CANVAS_H * 0.82);
+  } else {
+    const a = Math.max(0, 1 - (performance.now() - state.flashStart) / 420);   // 白闪渐隐
+    if (a > 0) { ctx.fillStyle = "rgba(255,255,255," + a + ")"; ctx.fillRect(0, 0, CANVAS_W, CANVAS_H); }
   }
 }
 
