@@ -335,12 +335,15 @@ canvas.addEventListener("pointerdown", (e) => {
   for (let i = state.pieces.length - 1; i >= 0; i--) {
     const pc = state.pieces[i];
     if (p.x >= pc.x && p.x <= pc.x + CELL && p.y >= pc.y && p.y <= pc.y + CELL) {
+      // 记下拿起时的来处（用于落到已占格时的「交换」）：原格 or 外围散点
+      const fromCell = pc.cell ? { r: pc.cell.r, c: pc.cell.c } : null;
+      const fromX = pc.x, fromY = pc.y;
       // 若它原本占着某格，先把那格腾出来
       if (pc.cell) { state.grid[pc.cell.r][pc.cell.c] = null; pc.cell = null; }
       // 置顶（移到数组末尾），记录拖拽偏移
       state.pieces.splice(i, 1);
       state.pieces.push(pc);
-      state.drag = { id: pc.id, offX: p.x - pc.x, offY: p.y - pc.y };
+      state.drag = { id: pc.id, offX: p.x - pc.x, offY: p.y - pc.y, fromCell, fromX, fromY };
       canvas.setPointerCapture(e.pointerId);
       break;
     }
@@ -356,32 +359,49 @@ canvas.addEventListener("pointermove", (e) => {
   pc.y = clamp(p.y - state.drag.offY, 0, CANVAS_H - CELL);
 });
 
+// 把一块碎片放进某格（更新坐标 + 网格占用）
+function placeInCell(pc, r, c) {
+  pc.cell = { r, c };
+  pc.x = GRID_X + c * CELL;
+  pc.y = GRID_Y + r * CELL;
+  state.grid[r][c] = pc.id;
+}
+
 function endDrag(e) {
   if (!state.drag) return;
-  const pc = pieceById(state.drag.id);
+  const drag = state.drag;
+  const pc = pieceById(drag.id);
   state.drag = null;
   if (e) try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
 
-  // 找离碎片中心最近的格子，够近且为空就吸附
+  // 找离碎片中心最近的格子
   const cx = pc.x + CELL / 2, cy = pc.y + CELL / 2;
-  let nr = Math.round((cy - GRID_Y - CELL / 2) / CELL);
-  let nc = Math.round((cx - GRID_X - CELL / 2) / CELL);
-  nr = clamp(nr, 0, ROWS - 1); nc = clamp(nc, 0, COLS - 1);
+  let nr = clamp(Math.round((cy - GRID_Y - CELL / 2) / CELL), 0, ROWS - 1);
+  let nc = clamp(Math.round((cx - GRID_X - CELL / 2) / CELL), 0, COLS - 1);
   const gcx = GRID_X + nc * CELL + CELL / 2, gcy = GRID_Y + nr * CELL + CELL / 2;
   const dist = Math.hypot(cx - gcx, cy - gcy);
 
-  if (dist <= SNAP_DIST && state.grid[nr][nc] === null) {
-    // 吸附到该格
-    pc.x = GRID_X + nc * CELL;
-    pc.y = GRID_Y + nr * CELL;
-    pc.cell = { r: nr, c: nc };
-    state.grid[nr][nc] = pc.id;
-
+  if (dist <= SNAP_DIST) {
+    const occupantId = state.grid[nr][nc];
+    if (occupantId === null) {
+      // 目标格为空 → 直接放进去
+      placeInCell(pc, nr, nc);
+    } else {
+      // 目标格已被占 → 交换：被占者回到 pc 的「来处」，pc 进目标格
+      const other = pieceById(occupantId);
+      if (drag.fromCell) {
+        placeInCell(other, drag.fromCell.r, drag.fromCell.c);   // 来自某格 → 互换格子
+      } else {
+        other.cell = null;                                      // 来自外围 → 被占者被挤到外围
+        other.x = drag.fromX; other.y = drag.fromY;
+      }
+      placeInCell(pc, nr, nc);
+    }
     const lv = LEVELS[state.levelIndex];
-    if (lv.onDrop) lv.onDrop(state, pc, { r: nr, c: nc });   // 关卡钩子：放置时机（可选）
+    if (lv.onDrop) lv.onDrop(state, pc, { r: nr, c: nc });      // 关卡钩子：放置时机（可选）
     checkWin();   // 放对位置不锁定，可随时再拖；只在满足胜利条件时判胜
   }
-  // 否则：留在松手处（放置区里自由放着），等玩家再拖
+  // 否则（离格子太远）：留在松手处，等玩家再拖
 }
 
 // pointerup / 取消 / 失焦 都收尾，避免碎片「粘」在手上
@@ -906,41 +926,6 @@ function drawStickman(octx, p, x, floorY, s, color) {
   // 头
   octx.beginPath(); octx.arc(shX + lean * 0.5, shY - headR * 1.1, headR, 0, Math.PI * 2); octx.stroke();
   octx.restore();
-}
-
-/* ---------- 第 4 关：摄像头实时画面 ---------- */
-const camVideo = document.createElement("video");
-camVideo.playsInline = true; camVideo.muted = true;
-let camReady = false, camRequested = false;
-
-function camInit() {
-  if (camRequested) return;
-  camRequested = true;
-  navigator.mediaDevices.getUserMedia({ video: true })
-    .then(stream => { camVideo.srcObject = stream; camVideo.play(); camReady = true; })
-    .catch(() => { camReady = false; });
-}
-
-function drawCamera(octx, info) {
-  if (!camRequested) camInit();
-  octx.fillStyle = "#000";
-  octx.fillRect(0, 0, info.gridW, info.gridH);
-  if (camReady && camVideo.readyState >= 2) {
-    // 镜像 + 等比填满（cover）
-    const vw = camVideo.videoWidth, vh = camVideo.videoHeight;
-    const scale = Math.max(info.gridW / vw, info.gridH / vh);
-    const dw = vw * scale, dh = vh * scale;
-    const dx = (info.gridW - dw) / 2, dy = (info.gridH - dh) / 2;
-    octx.save();
-    octx.translate(info.gridW, 0); octx.scale(-1, 1);   // 水平镜像
-    octx.drawImage(camVideo, info.gridW - dx - dw, dy, dw, dh);
-    octx.restore();
-  } else {
-    octx.fillStyle = "#333";
-    octx.font = "bold " + Math.floor(info.gridH * 0.08) + "px sans-serif";
-    octx.textAlign = "center"; octx.textBaseline = "middle";
-    octx.fillText("等待摄像头授权…", info.gridW / 2, info.gridH / 2);
-  }
 }
 
 /* ---------- 第 4 关：视频影像（静音循环，cover 填满） ----------
