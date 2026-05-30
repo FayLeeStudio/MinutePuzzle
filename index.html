@@ -44,7 +44,7 @@
     backdrop-filter: blur(2px);
   }
   #overlay[hidden] { display: none; }
-  /* 准备阶段：不遮挡画面，按钮放底部，让玩家看清完整的钟 */
+  /* 准备阶段：不遮挡画面，按钮放底部，让玩家看清完整画面 */
   #overlay.ready {
     background: transparent; backdrop-filter: none;
     justify-content: flex-end; padding-bottom: 34px;
@@ -66,7 +66,7 @@
 </head>
 <body>
   <div id="wrap">
-    <div id="tip">把外围 12 块碎片拖进中间网格，趁倒计时归零前拼出完整数字</div>
+    <div id="tip">把外围碎片拖进中间网格，趁倒计时归零前拼出完整画面</div>
     <div id="stage">
       <canvas id="game" width="980" height="620"></canvas>
       <div id="overlay" hidden>
@@ -79,65 +79,103 @@
 <script>
 "use strict";
 /* =====================================================================
-   MinutePuzzle — 最小可玩版
-   玩法：中间 3×4 网格是一块「实时七段数码管显示屏」，数字 59→00 每秒一跳。
-   12 块碎片是这块屏幕「对应区域、此刻」的取景框（不是静态快照），
-   拖到正确格子并对齐即吸附锁定；全部拼对算赢，倒计时到 00 后未拼完算输。
-   代码按 CLAUDE.md 的五块组织。
+   MinutePuzzle — 多关卡版（通用引擎 + 关卡配置）
+   每关都是一局「1 分钟拼图」：中间是一张实时变化的画面，碎片是它「对应
+   区域、此刻」的取景框（不是静态快照）。拖碎片回正确格子并对齐即吸附，
+   全部拼对算赢，倒计时到 00 后未拼完算输。过一关进下一关（线性闯关）。
+
+   引擎只认「通用框架 + 关卡配置」：新关卡 = 往 LEVELS 加一个配置对象，
+   不改引擎主流程。代码按 CLAUDE.md 的分块组织。
    ===================================================================== */
 
-/* ---------- 全局配置 ---------- */
-const COLS = 4, ROWS = 3;          // 3×4 = 12 格（3 行 4 列，贴合两位数字的宽屏比例）
-const START = 60;                   // 倒计时起始数字（主题：1min）
-
-// 以下尺寸都随窗口自适应，由 resize() 实时计算（不再写死）
-let CELL;                           // 每格 / 每块碎片边长
-let SNAP_DIST;                      // 松手时离格子中心多近才吸附
-let GRID_W, GRID_H;                 // 网格 = 显示屏整体尺寸
-let CANVAS_W, CANVAS_H;             // 画布（= 视口可用区域）尺寸
-let GRID_X, GRID_Y;                 // 网格左上角（居中）
-
-/* 数码管配色 */
-const SCREEN_BG = "#000000";   // 屏幕底色（纯黑，不带虚色）
-const SEG_LIT   = "#ff3b30";   // 点亮的段（熄灭的段不画，去掉虚虚的底色）
-
-/* 0–9 各点亮哪几段：顺序 [a,b,c,d,e,f,g]
-        aaa
-       f   b
-        ggg
-       e   c
-        ddd                      */
-const SEGMAP = {
-  0:[1,1,1,1,1,1,0], 1:[0,1,1,0,0,0,0], 2:[1,1,0,1,1,0,1],
-  3:[1,1,1,1,0,0,1], 4:[0,1,1,0,0,1,1], 5:[1,0,1,1,0,1,1],
-  6:[1,0,1,1,1,1,1], 7:[1,1,1,0,0,0,0], 8:[1,1,1,1,1,1,1],
-  9:[1,1,1,1,0,1,1],
-};
-
 /* =====================================================================
-   1) 画布与画笔（主 canvas + 离屏 canvas）
+   0) 画布与画笔（主 canvas + 离屏 canvas）—— 关卡渲染要用到，先建好
    ===================================================================== */
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 
-// 离屏 canvas：每帧把整块显示屏画在这里，尺寸 = 网格尺寸（在 resize() 里设定），
+// 离屏 canvas：每帧把整张「被拼的图」画在这里，尺寸 = 网格尺寸（在 resize() 设定），
 // 方便碎片按 1:1 取子矩形
 const off = document.createElement("canvas");
 const octx = off.getContext("2d");
+
+/* 通用配色 */
+const SCREEN_BG = "#000000";   // 屏幕底色（纯黑）
+const ACCENT    = "#ff3b30";   // 主题红
+
+/* =====================================================================
+   1) 关卡数据（LEVELS）
+   每关：必填 id / name / grid / renderFrame；选填 duration 及生命周期钩子
+   （onStart / onDrop / checkWin）。renderFrame(octx, off, info) 把这一关
+   「被拼的图」每帧画到离屏 canvas 上，info 带当前帧信息。
+   ===================================================================== */
+const LEVELS = [
+  {
+    id: 1,
+    name: "倒计时",
+    grid: { cols: 4, rows: 3 },   // 4×3=12，贴合两位数字的宽屏比例
+    duration: 60,
+    // 七段数码管两位数字，按剩余秒数点亮对应段
+    renderFrame(octx, off, info) { drawSevenSeg(octx, info); },
+  },
+  {
+    id: 2,
+    name: "贪吃蛇",
+    grid: { cols: 4, rows: 3 },   // 与第一关一致：4×3=12 块
+    duration: 60,
+    // 自动对局的贪吃蛇：影像在 60s 内持续移动，碎片随之实时变化
+    renderFrame(octx, off, info) { drawSnake(octx, info); },
+  },
+];
+
+/* =====================================================================
+   2) 全局配置（随关卡 / 窗口变化）
+   ===================================================================== */
+let COLS, ROWS;                    // 当前关网格列数 / 行数（= 碎片块数）
+let DURATION;                      // 当前关倒计时秒数
+let CELL;                          // 每格 / 每块碎片边长
+let SNAP_DIST;                     // 松手时离格子中心多近才吸附
+let GRID_W, GRID_H;                // 网格 = 显示屏整体尺寸
+let CANVAS_W, CANVAS_H;            // 画布（= 视口可用区域）尺寸
+let GRID_X, GRID_Y;               // 网格左上角（居中）
 
 // 浮层 DOM
 const tipEl = document.getElementById("tip");
 const overlay = document.getElementById("overlay");
 const msgEl = document.getElementById("msg");
 const btnEl = document.getElementById("restart");
-// 按钮行为随状态变化：准备阶段＝开始；胜负阶段＝重置回准备
+
+/* =====================================================================
+   3) 游戏状态（集中管理）
+   ===================================================================== */
+const state = {
+  levelIndex: 0,       // 当前关在 LEVELS 中的下标
+  status: "ready",     // "ready" | "playing" | "win" | "lose"
+  startTime: 0,        // performance.now()，用时间戳推算倒计时
+  elapsed: 0,          // 已过秒数（浮点，供动画用）
+  remain: 0,           // 当前剩余秒数（整数，供数字显示用）
+  result: 0,           // 胜利时定格的剩余秒数
+  pieces: [],          // 碎片数组（绘制顺序 = 数组顺序，拖拽中的排最后＝最上层）
+  grid: [],            // grid[r][c] = 占用该格的碎片 id，空为 null
+  drag: null,          // { id, offX, offY } 当前拖拽信息
+};
+
+// 按钮行为随状态变化：准备＝开始；胜利＝进下一关/通关重来；失败＝重试本关
 btnEl.addEventListener("click", () => {
-  if (state.status === "ready") startGame();
-  else setupGame();
+  if (state.status === "ready") {
+    startGame();
+  } else if (state.status === "win") {
+    const next = state.levelIndex + 1;
+    loadLevel(next < LEVELS.length ? next : 0);   // 还有下一关就进，否则从头
+  } else {
+    setupGame();   // 失败：回到本关准备状态
+  }
 });
 
-// 自适应布局：按当前视口算出画布尺寸、格子大小、网格位置，并重排碎片。
-// 画布缓冲区 = 显示尺寸（1:1），所以无论横竖屏都不会被拉伸。
+/* =====================================================================
+   4) 自适应布局：按当前视口算出画布尺寸、格子大小、网格位置，并重排碎片。
+   画布缓冲区 = 显示尺寸（1:1），所以无论横竖屏都不会被拉伸。
+   ===================================================================== */
 function resize() {
   const tipH = tipEl ? tipEl.offsetHeight : 0;
   CANVAS_W = Math.floor(Math.min(window.innerWidth, 1600));
@@ -145,9 +183,9 @@ function resize() {
   canvas.width = CANVAS_W; canvas.height = CANVAS_H;
   canvas.style.width = CANVAS_W + "px"; canvas.style.height = CANVAS_H + "px";
 
-  // 格子大小：网格约占宽度 72%、高度 45%，取小的一边，保证四周留出散布碎片的余地
+  // 格子大小：网格约占宽度 72%、高度 60%，取小的一边，保证四周留出散布碎片的余地
   const cellByW = (CANVAS_W * 0.72) / COLS;
-  const cellByH = (CANVAS_H * 0.45) / ROWS;
+  const cellByH = (CANVAS_H * 0.60) / ROWS;
   CELL = Math.max(36, Math.floor(Math.min(cellByW, cellByH)));
   GRID_W = COLS * CELL; GRID_H = ROWS * CELL;
   GRID_X = Math.floor((CANVAS_W - GRID_W) / 2);
@@ -166,22 +204,26 @@ function resize() {
 }
 
 /* =====================================================================
-   2) 游戏状态（集中管理）
+   5) 关卡流程（进入关卡 / 准备 / 开始 / 散布）
    ===================================================================== */
-const state = {
-  status: "ready",     // "ready" | "playing" | "win" | "lose"
-  startTime: 0,        // performance.now()，用时间戳推算倒计时
-  number: START,       // 当前应显示的数字
-  result: 0,           // 胜利时定格的剩余数字
-  pieces: [],          // 碎片数组（绘制顺序 = 数组顺序，拖拽中的排最后＝最上层）
-  grid: [],            // grid[r][c] = 占用该格的碎片 id，空为 null
-  drag: null,          // { id, offX, offY } 当前拖拽信息
-};
 
-// 重置到「准备」状态：12 块碎片先拼合好放在正确格子里，等玩家点开始
+// 加载第 i 关：切换尺寸配置 → 重算布局 → 造碎片进入准备状态
+function loadLevel(i) {
+  const lv = LEVELS[i];
+  state.levelIndex = i;
+  COLS = lv.grid.cols; ROWS = lv.grid.rows;
+  DURATION = lv.duration != null ? lv.duration : 60;
+  state.pieces = []; state.grid = [];   // 清空旧关碎片，避免 resize 误搬
+  tipEl.textContent = `第 ${lv.id} 关 · ${lv.name} — 把碎片拖进网格，趁归零前拼完`;
+  resize();                              // 用新网格算 CELL / GRID_*（含 tip 行高）
+  setupGame();                           // 造碎片（用到上面算出的尺寸）
+}
+
+// 重置到「准备」状态：碎片先拼合好放在正确格子里，等玩家点开始
 function setupGame() {
   state.status = "ready";
-  state.number = START;
+  state.elapsed = 0;
+  state.remain = DURATION;
   state.drag = null;
 
   // 网格占用：每格放上对应碎片（呈现完整画面）
@@ -211,8 +253,13 @@ function startGame() {
   for (const p of state.pieces) p.cell = null;
   scatterPieces(state.pieces);     // 打散到外围放置区
   state.startTime = performance.now();
+  state.elapsed = 0;
+  state.remain = DURATION;
   state.status = "playing";
   overlay.hidden = true;
+
+  const lv = LEVELS[state.levelIndex];
+  if (lv.onStart) lv.onStart(state);   // 关卡钩子：进入后初始化（可选）
 }
 
 // 把碎片随机散到网格外围的「放置区」，尽量不互相重叠、不压到网格
@@ -244,7 +291,7 @@ function scatterPieces(pieces) {
 }
 
 /* =====================================================================
-   3) 输入（拖拽：pointer 事件，自动覆盖鼠标 + 触屏）
+   6) 输入（拖拽：pointer 事件，自动覆盖鼠标 + 触屏）
    ===================================================================== */
 
 // 把指针的页面坐标换算成画布逻辑坐标（画布被 CSS 缩放过，要按比例还原）
@@ -304,7 +351,10 @@ function endDrag(e) {
     pc.y = GRID_Y + nr * CELL;
     pc.cell = { r: nr, c: nc };
     state.grid[nr][nc] = pc.id;
-    checkWin();   // 放对位置不锁定，可随时再拖；只在全部到位时判胜
+
+    const lv = LEVELS[state.levelIndex];
+    if (lv.onDrop) lv.onDrop(state, pc, { r: nr, c: nc });   // 关卡钩子：放置时机（可选）
+    checkWin();   // 放对位置不锁定，可随时再拖；只在满足胜利条件时判胜
   }
   // 否则：留在松手处（放置区里自由放着），等玩家再拖
 }
@@ -315,49 +365,64 @@ canvas.addEventListener("pointercancel", endDrag);
 window.addEventListener("blur", () => endDrag(null));
 
 function checkWin() {
-  // 全部碎片都在各自正确格子 = 胜利（不需要锁定）
-  const done = state.pieces.every(p => p.cell && p.cell.r === p.row && p.cell.c === p.col);
-  if (done) {
+  const lv = LEVELS[state.levelIndex];
+  // 关卡可用 checkWin 钩子覆盖默认判定；不写则用「全部碎片归位」
+  const won = lv.checkWin ? lv.checkWin(state) : allPiecesHome();
+  if (won) {
     state.status = "win";
-    state.result = state.number;     // 定格此刻剩余数字作为成绩
+    state.result = state.remain;     // 定格此刻剩余秒数作为成绩
     showOverlay();
   }
 }
 
+// 默认胜利判定：全部碎片都在各自正确格子
+function allPiecesHome() {
+  return state.pieces.every(p => p.cell && p.cell.r === p.row && p.cell.c === p.col);
+}
+
 /* =====================================================================
-   4) 游戏循环（requestAnimationFrame：update → draw）
+   7) 游戏循环（requestAnimationFrame：update → draw）
    ===================================================================== */
 
 function update(now) {
   if (state.status !== "playing") return;   // 胜负已分则冻结画面
-  // 用时间戳推算当前应显示的数字，别逐帧累加
-  const elapsed = (now - state.startTime) / 1000;
-  let n = START - Math.floor(elapsed);
+  // 用时间戳推算当前剩余秒数，别逐帧累加
+  state.elapsed = (now - state.startTime) / 1000;
+  const n = DURATION - Math.floor(state.elapsed);
   if (n < 0) {
-    // 倒计时已越过 00 仍未拼完 → 判负，显示屏定格在 00
-    state.number = 0;
+    // 倒计时已越过 00 仍未拼完 → 判负，画面定格在 0
+    state.remain = 0;
     state.status = "lose";
     showOverlay();
     return;
   }
-  state.number = n;
+  state.remain = n;
 }
 
 function draw() {
-  // 4.1 重画显示屏到离屏 canvas
-  drawDisplay(state.number);
+  // 7.1 让当前关把「被拼的图」重画到离屏 canvas
+  const info = {
+    remain: state.remain, elapsed: state.elapsed, duration: DURATION,
+    cell: CELL, cols: COLS, rows: ROWS, gridW: GRID_W, gridH: GRID_H,
+  };
+  LEVELS[state.levelIndex].renderFrame(octx, off, info);
 
-  // 4.2 画主画布
-  ctx.fillStyle = "#0d0d10";
+  // 7.2 画主画布
+  // 放置区底色：比目标网格亮一点，散落的碎片更醒目、与中间目标区分得开
+  ctx.fillStyle = "#191921";
   ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
-  // 网格背景（像一块缺了块的屏幕）+ 淡淡的格线
+  // 目标网格 = 纯黑「屏幕」，明显区别于放置区 + 淡格线
   ctx.fillStyle = SCREEN_BG;
   ctx.fillRect(GRID_X, GRID_Y, GRID_W, GRID_H);
   ctx.strokeStyle = "rgba(255,255,255,.10)";
   ctx.lineWidth = 1;
   for (let c = 0; c <= COLS; c++) line(GRID_X + c * CELL, GRID_Y, GRID_X + c * CELL, GRID_Y + GRID_H);
   for (let r = 0; r <= ROWS; r++) line(GRID_X, GRID_Y + r * CELL, GRID_X + GRID_W, GRID_Y + r * CELL);
+  // 主题色外框：强调这是要把碎片拼回去的目标区
+  ctx.strokeStyle = "rgba(255,59,48,.55)";
+  ctx.lineWidth = 2;
+  ctx.strokeRect(GRID_X - 1, GRID_Y - 1, GRID_W + 2, GRID_H + 2);
 
   // 画所有碎片（数组顺序即层级，拖拽中的在最上层）
   for (const pc of state.pieces) {
@@ -368,7 +433,6 @@ function draw() {
     ctx.shadowBlur = dragging ? 22 : 8;
     ctx.shadowOffsetY = dragging ? 8 : 3;
     // 取景框：把显示屏对应子矩形画到碎片当前位置（1:1）
-    // 显示屏已按网格中线设计，所以每块碎片的内容天然落在自己中线上
     ctx.drawImage(off, pc.sx, pc.sy, CELL, CELL, pc.x, pc.y, CELL, CELL);
     ctx.restore();
     // 碎片边框
@@ -384,37 +448,58 @@ function loop(now) {
   requestAnimationFrame(loop);
 }
 
-/* ---------- 显示屏渲染（七段数码管，两位数字） ---------- */
-function drawDisplay(num) {
-  octx.fillStyle = SCREEN_BG;
-  octx.fillRect(0, 0, GRID_W, GRID_H);
+/* =====================================================================
+   8) 关卡渲染辅助
+   ===================================================================== */
 
+/* ---------- 第 1 关：七段数码管（两位数字，专用 4×3 网格） ---------- */
+
+/* 0–9 各点亮哪几段：顺序 [a,b,c,d,e,f,g]
+        aaa
+       f   b
+        ggg
+       e   c
+        ddd                      */
+const SEGMAP = {
+  0:[1,1,1,1,1,1,0], 1:[0,1,1,0,0,0,0], 2:[1,1,0,1,1,0,1],
+  3:[1,1,1,1,0,0,1], 4:[0,1,1,0,0,1,1], 5:[1,0,1,1,0,1,1],
+  6:[1,0,1,1,1,1,1], 7:[1,1,1,0,0,0,0], 8:[1,1,1,1,1,1,1],
+  9:[1,1,1,1,0,1,1],
+};
+
+function drawSevenSeg(octx, info) {
+  const cell = info.cell;
+  octx.fillStyle = SCREEN_BG;
+  octx.fillRect(0, 0, info.gridW, info.gridH);
+
+  const num = info.remain;
   const tens = Math.floor(num / 10), ones = num % 10;
-  const t = CELL * 0.26;                 // 段厚度
-  // 数字骨架的节点都落在格子中心：横段在行中线、竖段在列中线、拐角在格心
-  const yTop = cellCY(0), yMid = cellCY(1), yBot = cellCY(2);
-  drawDigit(tens, cellCX(0), cellCX(1), yTop, yMid, yBot, t); // 十位用第 0、1 列
-  drawDigit(ones, cellCX(2), cellCX(3), yTop, yMid, yBot, t); // 个位用第 2、3 列
+  const t = cell * 0.26;                       // 段厚度
+  const cx = (c) => c * cell + cell / 2;       // 第 c 列格心 x
+  const cy = (r) => r * cell + cell / 2;       // 第 r 行格心 y
+  // 数字骨架节点落在格子中心：横段在行中线、竖段在列中线、拐角在格心
+  const yTop = cy(0), yMid = cy(1), yBot = cy(2);
+  drawDigit(octx, tens, cx(0), cx(1), yTop, yMid, yBot, t); // 十位用第 0、1 列
+  drawDigit(octx, ones, cx(2), cx(3), yTop, yMid, yBot, t); // 个位用第 2、3 列
 }
 
-// 画一个七段数字：竖段在 colL/colR 两条列中线上，横段在 yTop/yMid/yBot 三条行中线上，
-// 所有拐角正好落在格子中心 → 每块碎片的内容天然在自己的中线上
-function drawDigit(d, colL, colR, yTop, yMid, yBot, t) {
+// 画一个七段数字：竖段在 colL/colR 列中线，横段在 yTop/yMid/yBot 行中线
+function drawDigit(octx, d, colL, colR, yTop, yMid, yBot, t) {
   const segs = SEGMAP[d];
   const hLen = colR - colL;   // 横段长 = 一个格距
   const vLen = yMid - yTop;   // 竖段长 = 一个格距
 
-  segH(colL, yTop, hLen, t, segs[0]); // a 上
-  segV(colR, yTop, vLen, t, segs[1]); // b 右上
-  segV(colR, yMid, vLen, t, segs[2]); // c 右下
-  segH(colL, yBot, hLen, t, segs[3]); // d 下
-  segV(colL, yMid, vLen, t, segs[4]); // e 左下
-  segV(colL, yTop, vLen, t, segs[5]); // f 左上
-  segH(colL, yMid, hLen, t, segs[6]); // g 中
+  segH(octx, colL, yTop, hLen, t, segs[0]); // a 上
+  segV(octx, colR, yTop, vLen, t, segs[1]); // b 右上
+  segV(octx, colR, yMid, vLen, t, segs[2]); // c 右下
+  segH(octx, colL, yBot, hLen, t, segs[3]); // d 下
+  segV(octx, colL, yMid, vLen, t, segs[4]); // e 左下
+  segV(octx, colL, yTop, vLen, t, segs[5]); // f 左上
+  segH(octx, colL, yMid, hLen, t, segs[6]); // g 中
 }
 
 // 横向段：(x,y) 为左端中心点，len 长度，t 厚度，六边形带尖端
-function segH(x, y, len, t, on) {
+function segH(octx, x, y, len, t, on) {
   const h = t / 2;
   octx.beginPath();
   octx.moveTo(x, y);
@@ -424,11 +509,11 @@ function segH(x, y, len, t, on) {
   octx.lineTo(x + len - h, y + h);
   octx.lineTo(x + h, y + h);
   octx.closePath();
-  fillSeg(on, t);
+  fillSeg(octx, on, t);
 }
 
 // 纵向段：(x,y) 为上端中心点，len 长度，t 厚度
-function segV(x, y, len, t, on) {
+function segV(octx, x, y, len, t, on) {
   const h = t / 2;
   octx.beginPath();
   octx.moveTo(x, y);
@@ -438,29 +523,169 @@ function segV(x, y, len, t, on) {
   octx.lineTo(x - h, y + len - h);
   octx.lineTo(x - h, y + h);
   octx.closePath();
-  fillSeg(on, t);
+  fillSeg(octx, on, t);
 }
 
-function fillSeg(on, t) {
-  if (!on) return;                  // 熄灭的段不画（去掉虚虚的底色）
-  octx.shadowColor = SEG_LIT;
+function fillSeg(octx, on, t) {
+  if (!on) return;                  // 熄灭的段不画
+  octx.shadowColor = ACCENT;
   octx.shadowBlur = t * 0.7;        // 点亮段加一点辉光
-  octx.fillStyle = SEG_LIT;
+  octx.fillStyle = ACCENT;
   octx.fill();
   octx.shadowBlur = 0;
 }
 
-/* ---------- 小工具 ---------- */
-function cellCX(c) { return c * CELL + CELL / 2; }   // 第 c 列格子中心 x（离屏坐标）
-function cellCY(r) { return r * CELL + CELL / 2; }   // 第 r 行格子中心 y
-function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
-function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
-function pieceById(id) { return state.pieces.find(p => p.id === id); }
-function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+/* ---------- 第 2 关：自动贪吃蛇（哈密顿回路 + 抄近路，随机食物，吃满全屏） ----------
+   核心：蛇始终沿一条「哈密顿回路」（遍历每格恰好一次的固定环）行进 → 永远不会
+   原地打转、也不会把自己困死；同时在「不越过自己尾巴」的安全范围内抄近路冲向
+   随机食物 → 看着就是在规划路线快速吃。蛇越长可抄的近路越少，自然收敛到沿环
+   慢慢填满。状态持久，按 elapsed 决定性推进（胜负冻结自然停、归零自然重开）。
+   棋盘格 = 拼图网格的 DIV 倍细分（每块拼图含 DIV×DIV 个蛇格）。
+   两个可调旋钮：SNAKE_STEPS_PER_SEC（速度/吃多快）、SNAKE_TILE_DIV（细分=能吃多满）。*/
+const snake = { W: 0, H: 0, cycle: [], cidx: null, body: [], occ: new Set(), food: -1, step: -1 };
+const SNAKE_TILE_DIV = 4;                   // 每块拼图细分成 DIV×DIV 个蛇格
+const SNAKE_STEPS_PER_SEC = 16;             // 速度：每秒走几格（越大吃得越快、越满）
+const SNAKE_STEP_DT = 1 / SNAKE_STEPS_PER_SEC;
+const SNAKE_START_LEN = 3;
+
+// 格子用整数键 k = y*W + x
+function snakeX(k) { return k % snake.W; }
+function snakeY(k) { return (k / snake.W) | 0; }
+function snakeNeighbors(k) {
+  const x = k % snake.W, y = (k / snake.W) | 0, r = [];
+  if (x + 1 < snake.W) r.push(k + 1);
+  if (x - 1 >= 0)      r.push(k - 1);
+  if (y + 1 < snake.H) r.push(k + snake.W);
+  if (y - 1 >= 0)      r.push(k - snake.W);
+  return r;
+}
+
+// 造哈密顿回路（需要宽或高其一为偶数；本游戏宽 W = cols*DIV 必为偶数）。
+// 缓存 cycle（按行进顺序的格子键）与 cidx（每格在环上的序号）。
+function snakeBuildCycle(W, H) {
+  const order = [];
+  if (H % 2 === 0) {
+    // 高为偶：顶行整条 → 中间行只走 1..W-1 蛇形 → 底行整条 → 第 0 列回程
+    for (let x = 0; x < W; x++) order.push([x, 0]);
+    for (let y = 1; y <= H - 2; y++) {
+      if (y % 2 === 1) for (let x = W - 1; x >= 1; x--) order.push([x, y]);
+      else             for (let x = 1; x <= W - 1; x++) order.push([x, y]);
+    }
+    for (let x = W - 1; x >= 0; x--) order.push([x, H - 1]);
+    for (let y = H - 2; y >= 1; y--) order.push([0, y]);
+  } else {
+    // 宽为偶：上面那套转置（x 与 y 互换）
+    for (let y = 0; y < H; y++) order.push([0, y]);
+    for (let x = 1; x <= W - 2; x++) {
+      if (x % 2 === 1) for (let y = H - 1; y >= 1; y--) order.push([x, y]);
+      else             for (let y = 1; y <= H - 1; y++) order.push([x, y]);
+    }
+    for (let y = H - 1; y >= 0; y--) order.push([W - 1, y]);
+    for (let x = W - 2; x >= 1; x--) order.push([x, 0]);
+  }
+  snake.cycle = order.map(([x, y]) => y * W + x);
+  snake.cidx = new Int32Array(W * H);
+  snake.cycle.forEach((k, i) => { snake.cidx[k] = i; });
+}
+
+function snakeReset(W, H) {
+  if (snake.W !== W || snake.H !== H || !snake.cidx) { snake.W = W; snake.H = H; snakeBuildCycle(W, H); }
+  snake.step = 0;
+  snake.body = [];                                  // body[0] = 头；沿环起点放一条短蛇
+  for (let i = SNAKE_START_LEN - 1; i >= 0; i--) snake.body.push(snake.cycle[i]);
+  snake.occ = new Set(snake.body);
+  snakeSpawnFood();
+}
+
+// 食物随机落在空格（满了则 food = -1，停步）
+function snakeSpawnFood() {
+  const N = snake.W * snake.H;
+  if (snake.occ.size >= N) { snake.food = -1; return; }
+  let k;
+  do { k = (Math.random() * N) | 0; } while (snake.occ.has(k));
+  snake.food = k;
+}
+
+function snakeStep() {
+  if (snake.food < 0) return;                               // 已吃满，定格
+  const N = snake.W * snake.H, ci = snake.cidx;
+  const head = snake.body[0], tail = snake.body[snake.body.length - 1];
+  const hI = ci[head];
+  const distTail = ((ci[tail] - hI) % N + N) % N;           // 沿环：头到尾的前向距离
+  const distFood = ((ci[snake.food] - hI) % N + N) % N;     // 沿环：头到食物的前向距离
+  // 邻格可进入：空，或恰是尾巴（这步尾巴会让位）
+  const freeOK = (n) => !snake.occ.has(n) || n === tail;
+
+  // 在「不越过尾巴」(d < distTail) 的安全前提下，优先抄到离食物最近(d ≤ distFood)的近路；
+  // 没有朝食物的近路就尽量沿环往前多走一步。
+  let best = -1, bestToFood = -1, bestFwd = -1;
+  for (const n of snakeNeighbors(head)) {
+    if (!freeOK(n)) continue;
+    const d = ((ci[n] - hI) % N + N) % N;                   // 这一步在环上前进多少
+    if (d === 0) continue;
+    if (distTail !== 0 && d >= distTail) continue;          // 越过尾巴＝危险，禁止
+    if (d <= distFood && d > bestToFood) { bestToFood = d; best = n; }   // 朝食物的最优近路
+    if (bestToFood < 0 && d > bestFwd) { bestFwd = d; }                  // 备选：纯前进
+  }
+  if (best < 0 && bestFwd >= 0) {                           // 没有朝食物的路 → 纯前进
+    for (const n of snakeNeighbors(head)) {
+      if (!freeOK(n)) continue;
+      const d = ((ci[n] - hI) % N + N) % N;
+      if (d === bestFwd) { best = n; break; }
+    }
+  }
+  if (best < 0) for (const n of snakeNeighbors(head)) { if (freeOK(n)) { best = n; break; } } // 兜底
+  if (best < 0) { snakeReset(snake.W, snake.H); return; }   // 死路（设计上基本不触发）
+
+  const eating = best === snake.food;
+  snake.body.unshift(best); snake.occ.add(best);
+  if (!eating) { const rm = snake.body.pop(); snake.occ.delete(rm); }
+  else snakeSpawnFood();                                    // 吃到＝长一节，再刷食物
+  snake.step++;
+}
+
+function drawSnake(octx, info) {
+  const W = info.gridW, H = info.gridH;
+  const tilesX = info.cols * SNAKE_TILE_DIV, tilesY = info.rows * SNAKE_TILE_DIV;
+  if (snake.W !== tilesX || snake.H !== tilesY) snakeReset(tilesX, tilesY);
+
+  // 按 elapsed 决定性推进到目标步数（冻结/归零自然对齐；切后台回来时限步兜底）
+  const target = Math.floor(info.elapsed / SNAKE_STEP_DT);
+  if (target < snake.step) snakeReset(tilesX, tilesY);
+  let guard = 80;
+  while (snake.step < target && guard-- > 0) snakeStep();
+
+  octx.fillStyle = SCREEN_BG;
+  octx.fillRect(0, 0, W, H);
+  const tw = W / tilesX, th = H / tilesY;
+  if (snake.food >= 0) {                                    // 食物（红）
+    octx.fillStyle = ACCENT;
+    snakeCell(octx, snakeX(snake.food) * tw, snakeY(snake.food) * th, tw, th, Math.min(tw, th) * 0.5);
+  }
+  for (let i = snake.body.length - 1; i >= 0; i--) {        // 蛇身：头亮、身暗
+    const k = snake.body[i];
+    octx.fillStyle = i === 0 ? "#39d353" : "#1f8f3d";
+    snakeCell(octx, snakeX(k) * tw, snakeY(k) * th, tw, th, Math.min(tw, th) * 0.28);
+  }
+}
+
+// 画一格蛇身/食物：留一点缝隙，看着像一节节
+function snakeCell(octx, x, y, w, h, r) {
+  const g = Math.min(w, h) * 0.12;
+  const xx = x + g, yy = y + g, ww = w - 2 * g, hh = h - 2 * g;
+  octx.beginPath();
+  if (octx.roundRect) octx.roundRect(xx, yy, ww, hh, r);
+  else octx.rect(xx, yy, ww, hh);
+  octx.fill();
+}
+
+/* =====================================================================
+   9) 浮层 + 小工具
+   ===================================================================== */
 
 // 准备阶段浮层：显示完整画面 + 开始按钮
 function showReady() {
-  msgEl.textContent = "看一眼完整的钟，点开始后碎片会打散";
+  msgEl.textContent = "看一眼完整画面，点开始后碎片会打散";
   btnEl.textContent = "开始游戏";
   overlay.classList.add("ready");
   overlay.hidden = false;
@@ -469,20 +694,74 @@ function showReady() {
 // 胜负浮层
 function showOverlay() {
   if (state.status === "win") {
-    msgEl.textContent = `拼好了！🎉 定格在 ${pad2(state.result)} 秒`;
+    const lv = LEVELS[state.levelIndex];
+    const isLast = state.levelIndex >= LEVELS.length - 1;
+    if (isLast) {
+      msgEl.textContent = `通关啦！🏆 最后一关定格在 ${pad2(state.result)} 秒`;
+      btnEl.textContent = "再玩一遍";
+    } else {
+      msgEl.textContent = `第 ${lv.id} 关完成！🎉 定格在 ${pad2(state.result)} 秒`;
+      btnEl.textContent = "下一关";
+    }
   } else {
     msgEl.textContent = "时间到 ⏱️ 没拼完——再来一次";
+    btnEl.textContent = "再试一次";
   }
-  btnEl.textContent = "再玩一局";
   overlay.classList.remove("ready");
   overlay.hidden = false;
 }
 
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+function line(x1, y1, x2, y2) { ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
+function pieceById(id) { return state.pieces.find(p => p.id === id); }
+function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+
 /* =====================================================================
-   5) 启动
+   ★ 调试作弊（仅供测试，提交前删掉整段）
+     · 键盘：数字键 1/2… 跳关；W 一键通关
+     · 触屏（手机）：左上角浮出的小按钮 — 「关1」「关2」跳关、「通关」一键拼好
    ===================================================================== */
-resize();        // 先算好布局（此时 state.pieces 还空，循环跳过）
-setupGame();     // 再造碎片（用到上面算出的尺寸）
+function cheatGoLevel(idx) { if (idx >= 0 && idx < LEVELS.length) loadLevel(idx); }
+function cheatWin() {
+  if (state.status === "ready") startGame();   // 没开局先开局，才好判胜
+  if (state.status !== "playing") return;
+  state.grid = Array.from({ length: ROWS }, () => Array(COLS).fill(null));
+  for (const p of state.pieces) {
+    p.cell = { r: p.row, c: p.col };
+    p.x = GRID_X + p.col * CELL;
+    p.y = GRID_Y + p.row * CELL;
+    state.grid[p.row][p.col] = p.id;
+  }
+  state.drag = null;
+  checkWin();
+}
+// 键盘
+window.addEventListener("keydown", (e) => {
+  if (e.key >= "1" && e.key <= "9") cheatGoLevel(+e.key - 1);
+  else if (e.key === "w" || e.key === "W") cheatWin();
+});
+// 触屏小工具条
+(function buildCheatBar() {
+  const bar = document.createElement("div");
+  bar.style.cssText = "position:fixed;left:6px;top:6px;z-index:9999;display:flex;gap:6px;" +
+    "font:12px -apple-system,sans-serif;opacity:.55;";
+  const mkBtn = (label, fn) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.style.cssText = "padding:6px 10px;border:none;border-radius:6px;background:#333;" +
+      "color:#fff;font:inherit;touch-action:manipulation;";
+    b.addEventListener("click", fn);
+    bar.appendChild(b);
+  };
+  LEVELS.forEach((lv, i) => mkBtn("关" + lv.id, () => cheatGoLevel(i)));
+  mkBtn("通关", cheatWin);
+  document.body.appendChild(bar);
+})();
+
+/* =====================================================================
+   10) 启动
+   ===================================================================== */
+loadLevel(0);    // 加载第一关（内部会 resize + 造碎片）
 // 窗口尺寸 / 横竖屏切换时重新自适应
 window.addEventListener("resize", resize);
 window.addEventListener("orientationchange", resize);
