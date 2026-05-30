@@ -136,9 +136,18 @@ const LEVELS = [
   },
   {
     id: 4,
+    name: "影像",
+    grid: { cols: 4, rows: 3 },
+    duration: 60,
+    // 视频影像（静音循环）：每帧画进离屏，碎片取子矩形。注意：仅 Pages/本地服务器下可加载
+    renderFrame(octx, off, info) { drawVideo(octx, info); },
+  },
+  {
+    id: 5,
     name: "摄像头",
     grid: { cols: 4, rows: 3 },
     duration: 60,
+    // 实时摄像头：拼的就是「此刻的你」。注意：需 https(Pages)/localhost + 用户授权
     renderFrame(octx, off, info) { drawCamera(octx, info); },
   },
 ];
@@ -931,6 +940,88 @@ function drawCamera(octx, info) {
     octx.font = "bold " + Math.floor(info.gridH * 0.08) + "px sans-serif";
     octx.textAlign = "center"; octx.textBaseline = "middle";
     octx.fillText("等待摄像头授权…", info.gridW / 2, info.gridH / 2);
+  }
+}
+
+/* ---------- 第 4 关：视频影像（静音循环，cover 填满） ----------
+   用一个隐藏的 <video> 持续播放，每帧 cover 裁剪画进离屏，碎片照旧取子矩形。
+   胜负时暂停定格、重玩续播。仅 Pages/本地服务器下能加载；file:// 双击会兜底提示。*/
+const vid = document.createElement("video");
+vid.src = "VideoAsset0.mp4";
+vid.muted = true; vid.loop = true; vid.playsInline = true;
+vid.setAttribute("playsinline", ""); vid.setAttribute("muted", ""); vid.preload = "auto";
+// 放到屏幕外但保持「已渲染」（非 display:none），确保能解码出帧供 drawImage 取用
+vid.style.cssText = "position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;";
+document.body.appendChild(vid);
+function videoPlay() { if (vid.paused) { const pr = vid.play(); if (pr) pr.catch(() => {}); } }
+
+function drawVideo(octx, info) {
+  const W = info.gridW, H = info.gridH;
+  octx.fillStyle = SCREEN_BG;
+  octx.fillRect(0, 0, W, H);
+
+  // 胜负冻结：暂停；准备/进行中：播放
+  if (state.status === "win" || state.status === "lose") { if (!vid.paused) vid.pause(); }
+  else videoPlay();
+
+  if (vid.readyState >= 2 && vid.videoWidth > 0) {     // 有帧可用 → cover 裁剪填满
+    const s = Math.max(W / vid.videoWidth, H / vid.videoHeight);
+    const dw = vid.videoWidth * s, dh = vid.videoHeight * s;
+    octx.drawImage(vid, (W - dw) / 2, (H - dh) / 2, dw, dh);
+  } else {                                             // 兜底：没加载出来
+    octx.fillStyle = "#9a9aa2";
+    octx.textAlign = "center"; octx.textBaseline = "middle";
+    octx.font = Math.floor(H * 0.05) + "px -apple-system, sans-serif";
+    const msg = location.protocol === "file:"
+      ? "视频需在 Pages / 本地服务器下运行" : "视频加载中…";
+    octx.fillText(msg, W / 2, H / 2);
+  }
+}
+
+/* ---------- 第 5 关：实时摄像头（拼此刻的你） ----------
+   首次进入时申请摄像头权限，拿到流后画进离屏（镜像，自拍感）。胜负暂停定格。
+   需安全环境：https(GitHub Pages) 或 localhost；否则/被拒则兜底提示。*/
+const cam = { state: "idle", video: null, stream: null };   // idle|requesting|ready|error
+function camEnsure() {
+  if (cam.state !== "idle") return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { cam.state = "error"; return; }
+  cam.state = "requesting";
+  const v = document.createElement("video");
+  v.muted = true; v.playsInline = true; v.setAttribute("playsinline", "");
+  v.style.cssText = "position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;";
+  document.body.appendChild(v);
+  cam.video = v;
+  navigator.mediaDevices.getUserMedia({ video: true, audio: false })
+    .then((stream) => { cam.stream = stream; v.srcObject = stream; v.play().catch(() => {}); cam.state = "ready"; })
+    .catch(() => { cam.state = "error"; });
+}
+
+function drawCamera(octx, info) {
+  const W = info.gridW, H = info.gridH;
+  octx.fillStyle = SCREEN_BG;
+  octx.fillRect(0, 0, W, H);
+  camEnsure();
+  const v = cam.video;
+
+  if (cam.state === "ready" && v && v.readyState >= 2 && v.videoWidth > 0) {
+    // 胜负冻结：暂停（流支持的视频暂停会定格当前帧）
+    if (state.status === "win" || state.status === "lose") { if (!v.paused) v.pause(); }
+    else if (v.paused) v.play().catch(() => {});
+    const s = Math.max(W / v.videoWidth, H / v.videoHeight);
+    const dw = v.videoWidth * s, dh = v.videoHeight * s;
+    octx.save();
+    octx.translate(W, 0); octx.scale(-1, 1);          // 水平镜像（自拍感）
+    octx.drawImage(v, (W - dw) / 2, (H - dh) / 2, dw, dh);
+    octx.restore();
+  } else {
+    octx.fillStyle = "#9a9aa2";
+    octx.textAlign = "center"; octx.textBaseline = "middle";
+    octx.font = Math.floor(H * 0.05) + "px -apple-system, sans-serif";
+    const secure = location.protocol === "https:" || location.hostname === "localhost";
+    const msg = cam.state === "error"
+      ? (secure ? "摄像头不可用 / 已拒绝" : "摄像头需在 https(Pages) 下授权")
+      : "请允许使用摄像头…";
+    octx.fillText(msg, W / 2, H / 2);
   }
 }
 
