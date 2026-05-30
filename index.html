@@ -239,7 +239,8 @@ function loadLevel(i) {
   DURATION = lv.duration != null ? lv.duration : 60;
   state.pieces = []; state.grid = [];   // 清空旧关碎片，避免 resize 误搬
   tipEl.textContent = `第 ${lv.id} 关 · ${lv.name} — 把碎片拖进网格，趁归零前拼完`;
-  if (lv.id === 4) camInit();
+  if (lv.id === 4) videoEnsureLoaded();
+  if (lv.id === 5) camEnsure();
   resize();                              // 用新网格算 CELL / GRID_*（含 tip 行高）
   setupGame();                           // 造碎片（用到上面算出的尺寸）
 }
@@ -938,7 +939,16 @@ vid.setAttribute("playsinline", ""); vid.setAttribute("muted", ""); vid.preload 
 // 放到屏幕外但保持「已渲染」（非 display:none），确保能解码出帧供 drawImage 取用
 vid.style.cssText = "position:fixed;left:-9999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;";
 document.body.appendChild(vid);
-function videoPlay() { if (vid.paused) { const pr = vid.play(); if (pr) pr.catch(() => {}); } }
+function videoEnsureLoaded() {
+  if (vid.readyState === 0) vid.load();
+}
+function videoPlay() {
+  videoEnsureLoaded();
+  if (vid.paused) {
+    const pr = vid.play();
+    if (pr) pr.catch(() => {});
+  }
+}
 
 function drawVideo(octx, info) {
   const W = info.gridW, H = info.gridH;
