@@ -134,6 +134,13 @@ const LEVELS = [
     // 两个火柴人自动对打：顶部 P1/P2 血条 + 居中倒计时，回合即「一分钟」
     renderFrame(octx, off, info) { drawFight(octx, info); },
   },
+  {
+    id: 4,
+    name: "摄像头",
+    grid: { cols: 4, rows: 3 },
+    duration: 60,
+    renderFrame(octx, off, info) { drawCamera(octx, info); },
+  },
 ];
 
 /* =====================================================================
@@ -223,6 +230,7 @@ function loadLevel(i) {
   DURATION = lv.duration != null ? lv.duration : 60;
   state.pieces = []; state.grid = [];   // 清空旧关碎片，避免 resize 误搬
   tipEl.textContent = `第 ${lv.id} 关 · ${lv.name} — 把碎片拖进网格，趁归零前拼完`;
+  if (lv.id === 4) camInit();
   resize();                              // 用新网格算 CELL / GRID_*（含 tip 行高）
   setupGame();                           // 造碎片（用到上面算出的尺寸）
 }
@@ -889,6 +897,41 @@ function drawStickman(octx, p, x, floorY, s, color) {
   // 头
   octx.beginPath(); octx.arc(shX + lean * 0.5, shY - headR * 1.1, headR, 0, Math.PI * 2); octx.stroke();
   octx.restore();
+}
+
+/* ---------- 第 4 关：摄像头实时画面 ---------- */
+const camVideo = document.createElement("video");
+camVideo.playsInline = true; camVideo.muted = true;
+let camReady = false, camRequested = false;
+
+function camInit() {
+  if (camRequested) return;
+  camRequested = true;
+  navigator.mediaDevices.getUserMedia({ video: true })
+    .then(stream => { camVideo.srcObject = stream; camVideo.play(); camReady = true; })
+    .catch(() => { camReady = false; });
+}
+
+function drawCamera(octx, info) {
+  if (!camRequested) camInit();
+  octx.fillStyle = "#000";
+  octx.fillRect(0, 0, info.gridW, info.gridH);
+  if (camReady && camVideo.readyState >= 2) {
+    // 镜像 + 等比填满（cover）
+    const vw = camVideo.videoWidth, vh = camVideo.videoHeight;
+    const scale = Math.max(info.gridW / vw, info.gridH / vh);
+    const dw = vw * scale, dh = vh * scale;
+    const dx = (info.gridW - dw) / 2, dy = (info.gridH - dh) / 2;
+    octx.save();
+    octx.translate(info.gridW, 0); octx.scale(-1, 1);   // 水平镜像
+    octx.drawImage(camVideo, info.gridW - dx - dw, dy, dw, dh);
+    octx.restore();
+  } else {
+    octx.fillStyle = "#333";
+    octx.font = "bold " + Math.floor(info.gridH * 0.08) + "px sans-serif";
+    octx.textAlign = "center"; octx.textBaseline = "middle";
+    octx.fillText("等待摄像头授权…", info.gridW / 2, info.gridH / 2);
+  }
 }
 
 /* =====================================================================
