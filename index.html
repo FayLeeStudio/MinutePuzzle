@@ -128,22 +128,15 @@ const LEVELS = [
   },
   {
     id: 3,
-    name: "影像一",
-    grid: { cols: 4, rows: 3 },
+    name: "仓鼠球",
+    grid: { cols: 4, rows: 3 },   // 4×3=12 块
     duration: 60,
-    // 视频影像（VideoAsset1）。仅 Pages/本地服务器下可加载
-    renderFrame(octx, off, info) { drawVideoSrc(octx, info, "VideoAsset1.mp4"); },
+    // 仓鼠球迷宫：陀螺仪或 WSAD 控制
+    renderFrame(octx, off, info) { drawHamsterBall(octx, info); },
+    onStart() { hamsterBallInit(); },
   },
   {
     id: 4,
-    name: "影像二",
-    grid: { cols: 4, rows: 3 },
-    duration: 60,
-    // 视频影像（VideoAsset0）。仅 Pages/本地服务器下可加载
-    renderFrame(octx, off, info) { drawVideoSrc(octx, info, "VideoAsset0.mp4"); },
-  },
-  {
-    id: 5,
     name: "摄像头",
     grid: { cols: 4, rows: 3 },
     duration: 60,
@@ -240,8 +233,13 @@ function loadLevel(i) {
   DURATION = lv.duration != null ? lv.duration : 60;
   state.pieces = []; state.grid = [];   // 清空旧关碎片，避免 resize 误搬
   tipEl.textContent = `第 ${lv.id} 关 · ${lv.name} — 把碎片拖进网格，趁归零前拼完`;
+  
+  // 摄像头与仓鼠球的清理
   if (lv.usesCamera) camEnsure();   // 摄像头关：尽早申请权限
   else camStop();                   // 其它关：关闭摄像头捕捉（相机灯灭）
+  
+  if (lv.id !== 3) hamsterBallCleanup();  // 非仓鼠球关：清理事件监听
+  
   resize();                              // 用新网格算 CELL / GRID_*（含 tip 行高）
   setupGame();                           // 造碎片（用到上面算出的尺寸）
 }
@@ -444,6 +442,10 @@ function update(now) {
     return;
   }
   state.remain = n;
+  
+  // 第三关物理更新
+  const lv = LEVELS[state.levelIndex];
+  if (lv.id === 3) hamsterBallUpdate();
 }
 
 function draw() {
@@ -803,6 +805,180 @@ function drawVideoSrc(octx, info, src) {
   }
 }
 
+/* ---------- 第 3 关：仓鼠球迷宫（陀螺仪 + WSAD 控制） ----------
+   迷宫由简单的墙体组成，红色球根据陀螺仪倾角或键盘输入滚动。*/
+const hamster = {
+  ballX: 4,       // 球在网格中的 x 坐标
+  ballY: 3,       // 球在网格中的 y 坐标
+  vx: 0,          // 球的 x 方向速度
+  vy: 0,          // 球的 y 方向速度
+  radius: 0,      // 球的半径（像素）
+  keys: { w: false, a: false, s: false, d: false },
+  cellW: 0,       // 迷宫单元宽
+  cellH: 0,       // 迷宫单元高
+};
+
+function hamsterBallInit() {
+  hamster.ballX = 4;      // 迷宫中间 (8/2)
+  hamster.ballY = 3;      // 迷宫中间 (6/2)
+  hamster.vx = 0;
+  hamster.vy = 0;
+  // 启用键盘监听
+  document.addEventListener("keydown", hamsterKeyDown);
+  document.addEventListener("keyup", hamsterKeyUp);
+  // 请求陀螺仪权限（iOS 13+ 需要用户交互激发）
+  if (typeof DeviceOrientationEvent !== "undefined" && DeviceOrientationEvent.requestPermission) {
+    DeviceOrientationEvent.requestPermission()
+      .then(perm => { if (perm === "granted") window.addEventListener("deviceorientation", hamsterGyro); })
+      .catch(() => {});
+  } else if (typeof DeviceOrientationEvent !== "undefined") {
+    window.addEventListener("deviceorientation", hamsterGyro);
+  }
+}
+
+function hamsterBallCleanup() {
+  document.removeEventListener("keydown", hamsterKeyDown);
+  document.removeEventListener("keyup", hamsterKeyUp);
+  window.removeEventListener("deviceorientation", hamsterGyro);
+}
+
+function hamsterKeyDown(e) {
+  const k = e.key.toLowerCase();
+  if (k === 'w') hamster.keys.w = true;
+  if (k === 'a') hamster.keys.a = true;
+  if (k === 's') hamster.keys.s = true;
+  if (k === 'd') hamster.keys.d = true;
+}
+
+function hamsterKeyUp(e) {
+  const k = e.key.toLowerCase();
+  if (k === 'w') hamster.keys.w = false;
+  if (k === 'a') hamster.keys.a = false;
+  if (k === 's') hamster.keys.s = false;
+  if (k === 'd') hamster.keys.d = false;
+}
+
+function hamsterGyro(e) {
+  // beta: -180~180 (前后倾角), gamma: -90~90 (左右倾角)
+  const beta = (e.beta || 0) * Math.PI / 180;   // 前后
+  const gamma = (e.gamma || 0) * Math.PI / 180;  // 左右
+  hamster.vy += Math.sin(beta) * 0.02;           // 加速度
+  hamster.vx += Math.sin(gamma) * 0.02;
+}
+
+function hamsterBallUpdate() {
+  if (state.status !== "playing") return;
+  
+  const cols = 8, rows = 6;
+  
+  // 应用键盘加速度（长按会积累速度）
+  if (hamster.keys.w) hamster.vy -= 1.2;
+  if (hamster.keys.s) hamster.vy += 1.2;
+  if (hamster.keys.a) hamster.vx -= 1.2;
+  if (hamster.keys.d) hamster.vx += 1.2;
+  
+  // 最大速度限制（重力感）
+  const maxV = 3.5;
+  hamster.vx = Math.max(-maxV, Math.min(maxV, hamster.vx));
+  hamster.vy = Math.max(-maxV, Math.min(maxV, hamster.vy));
+  
+  // 阻力：松手后缓慢停下
+  hamster.vx *= 0.88;
+  hamster.vy *= 0.88;
+  
+  // 更新位置
+  hamster.ballX += hamster.vx;
+  hamster.ballY += hamster.vy;
+  
+  // 简单迷宫（黑色墙体）：边界 + 几条竖墙
+  const walls = [
+    { x: 0, y: 0, w: cols, h: 0.3 },      // 上墙
+    { x: 0, y: rows - 0.3, w: cols, h: 0.3 }, // 下墙
+    { x: 0, y: 0, w: 0.3, h: rows },      // 左墙
+    { x: cols - 0.3, y: 0, w: 0.3, h: rows }, // 右墙
+    { x: 2, y: 1.5, w: 0.3, h: 2 },       // 中间竖墙1
+    { x: 5, y: 2, w: 0.3, h: 2 },         // 中间竖墙2
+  ];
+  
+  // 碰撞检测与响应
+  const ballRadius = 0.45;  // 网格单位内的球半径
+  walls.forEach(wall => {
+    const wx1 = wall.x, wy1 = wall.y, wx2 = wx1 + wall.w, wy2 = wy1 + wall.h;
+    const bx1 = hamster.ballX - ballRadius;
+    const bx2 = hamster.ballX + ballRadius;
+    const by1 = hamster.ballY - ballRadius;
+    const by2 = hamster.ballY + ballRadius;
+    
+    if (bx2 > wx1 && bx1 < wx2 && by2 > wy1 && by1 < wy2) {
+      // 碰撞：根据碰撞面判断反弹方向
+      const overlapLeft = bx2 - wx1;
+      const overlapRight = wx2 - bx1;
+      const overlapTop = by2 - wy1;
+      const overlapBottom = wy2 - by1;
+      const minOverlap = Math.min(overlapLeft, overlapRight, overlapTop, overlapBottom);
+      
+      if (minOverlap === overlapLeft) {
+        hamster.ballX = wx1 - ballRadius;
+        hamster.vx *= -0.5;
+      } else if (minOverlap === overlapRight) {
+        hamster.ballX = wx2 + ballRadius;
+        hamster.vx *= -0.5;
+      } else if (minOverlap === overlapTop) {
+        hamster.ballY = wy1 - ballRadius;
+        hamster.vy *= -0.5;
+      } else if (minOverlap === overlapBottom) {
+        hamster.ballY = wy2 + ballRadius;
+        hamster.vy *= -0.5;
+      }
+    }
+  });
+  
+  // 边界限制
+  hamster.ballX = Math.max(ballRadius, Math.min(cols - ballRadius, hamster.ballX));
+  hamster.ballY = Math.max(ballRadius, Math.min(rows - ballRadius, hamster.ballY));
+}
+
+function drawHamsterBall(octx, info) {
+  const W = info.gridW, H = info.gridH;
+  const cols = 8, rows = 6;
+  const cellW = W / cols, cellH = H / rows;
+  
+  hamster.cellW = cellW;
+  hamster.cellH = cellH;
+  hamster.radius = Math.min(cellW, cellH) * 0.3;
+  
+  octx.fillStyle = SCREEN_BG;
+  octx.fillRect(0, 0, W, H);
+  
+  // 简单迷宫（黑色墙体）：边界 + 几条竖墙
+  const walls = [
+    { x: 0, y: 0, w: cols, h: 0.3 },      // 上墙
+    { x: 0, y: rows - 0.3, w: cols, h: 0.3 }, // 下墙
+    { x: 0, y: 0, w: 0.3, h: rows },      // 左墙
+    { x: cols - 0.3, y: 0, w: 0.3, h: rows }, // 右墙
+    { x: 2, y: 1.5, w: 0.3, h: 2 },       // 中间竖墙1
+    { x: 5, y: 2, w: 0.3, h: 2 },         // 中间竖墙2
+  ];
+  
+  // 画迷宫
+  octx.fillStyle = "#2a2a30";
+  walls.forEach(wall => {
+    octx.fillRect(wall.x * cellW, wall.y * cellH, wall.w * cellW, wall.h * cellH);
+  });
+  
+  // 画球（红色）
+  octx.fillStyle = "#ff3b30";
+  octx.beginPath();
+  octx.arc(hamster.ballX * cellW, hamster.ballY * cellH, hamster.radius, 0, Math.PI * 2);
+  octx.fill();
+  
+  // 球的高光
+  octx.fillStyle = "rgba(255, 255, 255, 0.3)";
+  octx.beginPath();
+  octx.arc(hamster.ballX * cellW - hamster.radius * 0.4, hamster.ballY * cellH - hamster.radius * 0.4, hamster.radius * 0.3, 0, Math.PI * 2);
+  octx.fill();
+}
+
 /* ---------- 第 5 关：实时摄像头（拼此刻的你） ----------
    首次进入时申请摄像头权限，拿到流后画进离屏（镜像，自拍感）。胜负暂停定格。
    需安全环境：https(GitHub Pages) 或 localhost；否则/被拒则兜底提示。*/
@@ -991,7 +1167,7 @@ function cheatWin() {
 // 键盘
 window.addEventListener("keydown", (e) => {
   if (e.key >= "1" && e.key <= "9") cheatGoLevel(+e.key - 1);
-  else if (e.key === "w" || e.key === "W") cheatWin();
+  else if (e.key === "p" || e.key === "P") cheatWin();
 });
 // 触屏小工具条
 (function buildCheatBar() {
