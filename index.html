@@ -859,6 +859,9 @@ function hamsterKeyUp(e) {
 }
 
 function hamsterGyro(e) {
+  // 如果有任何按键按下，忽略陀螺仪，完全使用 WSAD 操控
+  if (hamster.keys.w || hamster.keys.a || hamster.keys.s || hamster.keys.d) return;
+  
   // beta: -180~180 (前后倾角), gamma: -90~90 (左右倾角)
   const beta = (e.beta || 0) * Math.PI / 180;   // 前后
   const gamma = (e.gamma || 0) * Math.PI / 180;  // 左右
@@ -949,22 +952,6 @@ function drawHamsterBall(octx, info) {
   
   octx.fillStyle = SCREEN_BG;
   octx.fillRect(0, 0, W, H);
-  
-  // 简单迷宫（黑色墙体）：边界 + 几条竖墙
-  const walls = [
-    { x: 0, y: 0, w: cols, h: 0.3 },      // 上墙
-    { x: 0, y: rows - 0.3, w: cols, h: 0.3 }, // 下墙
-    { x: 0, y: 0, w: 0.3, h: rows },      // 左墙
-    { x: cols - 0.3, y: 0, w: 0.3, h: rows }, // 右墙
-    { x: 2, y: 1.5, w: 0.3, h: 2 },       // 中间竖墙1
-    { x: 5, y: 2, w: 0.3, h: 2 },         // 中间竖墙2
-  ];
-  
-  // 画迷宫
-  octx.fillStyle = "#2a2a30";
-  walls.forEach(wall => {
-    octx.fillRect(wall.x * cellW, wall.y * cellH, wall.w * cellW, wall.h * cellH);
-  });
   
   // 画球（红色）
   octx.fillStyle = "#ff3b30";
